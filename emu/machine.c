@@ -217,7 +217,7 @@ static inline int16_t clamp16(int32_t v)
 
 // Mix-balans (twee knoppen) + master-volume tegen oversturing.
 // emu2149 geeft ~0..765; de SCC zit bij games vaak op bescheiden volumes.
-#define PSG_GAIN 16
+#define PSG_GAIN 8
 #define SCC_GAIN 2
 #define MASTER_NUM 3   // totaal op 75% voor headroom
 #define MASTER_DEN 4

@@ -7,8 +7,8 @@
 #define MHZ 3.56
 #define CYC_PER_INT (uint32_t)((MHZ * 1000000) / HZ)
 #define MACHINE_LOOP_TIME (1000 / HZ)
-#define AUDIO_SAMPLE_RATE 49716 // MSX-audio-rate (matcht de SCC)
-#define AUDIO_SAMPLES_PER_FRAME (AUDIO_SAMPLE_RATE / HZ) // ~828
+#define AUDIO_SAMPLE_RATE 48000 // direct 48 kHz -> HDMI-native, geen resampling nodig
+#define AUDIO_SAMPLES_PER_FRAME (AUDIO_SAMPLE_RATE / HZ) // 800
 
 bool machine_init();
 void machine_do_cycles();
