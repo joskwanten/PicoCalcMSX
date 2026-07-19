@@ -1,5 +1,6 @@
 # Build output
-build/
+build*/
+build-hdmi/
 
 # Third-party Zeta Z80 core — fetched via tools/setup-zeta.sh (see README)
 zeta/
@@ -20,3 +21,5 @@ emu/kvall2m1.h
 
 # macOS
 .DS_Store
+emu/nemesis2.h
+emu/f1spirit.h

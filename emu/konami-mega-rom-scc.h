@@ -1,7 +1,7 @@
 #include <stdint.h>
 
 #define SCC_PAGE_SIZE 0x2000
-#define SCC_SAMPLE_RATE 49716   // MSX-audio-rate (3.579545MHz / 72)
+#define SCC_SAMPLE_RATE 48000   // direct 48 kHz -> HDMI-native (toonhoogte komt van de 3.579545MHz-klok)
 
 typedef struct {
     uint8_t scc[256];       // SCC-registers (waveforms signed, rest unsigned)

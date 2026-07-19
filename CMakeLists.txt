@@ -28,19 +28,30 @@ set(PICO_BOARD pico2_w CACHE STRING "Board type")
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(PicoCalcMSX C CXX ASM)
+project(BareMSX C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(PicoCalcMSX
-        PicoCalcMSX.c
-        lcd.c
+# Beelduitvoer: HDMI/DVI via RP2350 HSTX (pico_hdmi), of de PicoCalc ILI9488-LCD.
+option(BAREMSX_HDMI "Output over HDMI/DVI (RP2350 HSTX) instead of the SPI LCD" ON)
+
+# De PicoCalc-keyboard (STM32 op I2C1) bestaat alleen mét het PicoCalc-moederbord.
+# Een standalone HDMI-bord heeft (nog) geen keyboard — USB-HID is toekomstig werk.
+# Zonder PicoCalc hangt de I2C-init, dus in de HDMI-build standaard uit.
+if(BAREMSX_HDMI)
+    set(_kbd_default OFF)
+else()
+    set(_kbd_default ON)
+endif()
+option(PICOCALC_I2C_KEYBOARD "Use the PicoCalc STM32 I2C keyboard" ${_kbd_default})
+
+add_executable(BareMSX
+        main_pico.c
         i2ckbd.c
         keymap.c
-        audio.c
         # MSX emulator core (ported from sdl-msx)
         emu/machine.c
         zeta/Z80.c
@@ -53,39 +64,105 @@ add_executable(PicoCalcMSX
         emu/empty.c
         emu/util.c
         emu/konami-mega-rom-scc.c
+        emu/mapper.c
         emu/emu2149.c
         )
 
-pico_set_program_name(PicoCalcMSX "PicoCalcMSX")
-pico_set_program_version(PicoCalcMSX "0.1")
+pico_set_program_name(BareMSX "BareMSX")
+pico_set_program_version(BareMSX "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(PicoCalcMSX 0)
-pico_enable_stdio_usb(PicoCalcMSX 1)
+pico_enable_stdio_uart(BareMSX 1)
+pico_enable_stdio_usb(BareMSX 0)
 
 # Add the standard library to the build
-target_link_libraries(PicoCalcMSX
+target_link_libraries(BareMSX
         pico_stdlib
         pico_multicore)
 
 # Add the standard include files to the build
-target_include_directories(PicoCalcMSX PRIVATE
+target_include_directories(BareMSX PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/emu
         ${CMAKE_CURRENT_LIST_DIR}/zeta
 )
 
 # Zeta Z80 core wordt statisch mee-gecompileerd
-target_compile_definitions(PicoCalcMSX PRIVATE Z80_STATIC)
+target_compile_definitions(BareMSX PRIVATE Z80_STATIC)
 
-# Add any user requested libraries
-target_link_libraries(PicoCalcMSX
-        hardware_spi
+# Een gefaalde malloc moet NULL teruggeven (het ROM-laadpad handelt dat af),
+# niet panicken (SDK-default) — dat gaf een stille lockup bij grote ROMs.
+target_compile_definitions(BareMSX PRIVATE PICO_MALLOC_PANIC=0)
+
+# Ingebakken fallback-ROMs (emu/bios_rom.h + emu/nemesis2.h; zelf genereren met
+# tools/rom_to_header.py — zitten niet in git). Zonder deze optie bevat de
+# binary géén copyrighted materiaal (publiceerbare build) en is een SD-kaart
+# met een BIOS in system/ vereist. Default: aan als de headers bestaan.
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/emu/bios_rom.h AND EXISTS ${CMAKE_CURRENT_LIST_DIR}/emu/nemesis2.h)
+    set(_baked_default ON)
+else()
+    set(_baked_default OFF)
+endif()
+option(BAREMSX_BAKED_ROMS "Bake fallback BIOS+game ROM headers into the binary" ${_baked_default})
+if(BAREMSX_BAKED_ROMS)
+    target_compile_definitions(BareMSX PRIVATE BAREMSX_BAKED_ROMS=1)
+endif()
+
+if(PICOCALC_I2C_KEYBOARD)
+    target_compile_definitions(BareMSX PRIVATE PICOCALC_I2C_KEYBOARD=1)
+endif()
+
+# USB-keyboard via TinyUSB-host op de native USB-poort (standalone HDMI-bord).
+option(BAREMSX_USB_KEYBOARD "Read a USB keyboard via TinyUSB host" ON)
+if(BAREMSX_USB_KEYBOARD)
+    target_sources(BareMSX PRIVATE usbkbd.c)
+    target_link_libraries(BareMSX tinyusb_host tinyusb_board)
+    target_compile_definitions(BareMSX PRIVATE BAREMSX_USB_KEYBOARD=1)
+endif()
+
+# SD-card game-loading + boot-menu (FatFs op SPI0, GP2-5).
+option(BAREMSX_SD "SD-card game loading + boot menu (FatFs)" ON)
+if(BAREMSX_SD)
+    target_sources(BareMSX PRIVATE
+            menu.c
+            storage_pico.c
+            sd_spi.c
+            diskio.c
+            flash_stage.c
+            third_party/fatfs/ff.c
+            third_party/fatfs/ffunicode.c
+            third_party/fatfs/ffsystem.c
+    )
+    target_include_directories(BareMSX PRIVATE ${CMAKE_CURRENT_LIST_DIR}/third_party/fatfs)
+    target_link_libraries(BareMSX hardware_spi hardware_flash hardware_watchdog)
+    target_compile_definitions(BareMSX PRIVATE BAREMSX_SD=1)
+endif()
+
+# Backend-specifieke sources + libraries
+if(BAREMSX_HDMI)
+    target_sources(BareMSX PRIVATE
+            video_hstx.c
+            audio_hdmi.c
+    )
+    # 252 MHz sysclk + HSTX-deler 2 -> zelfde 25.2 MHz pixelklok, 2x CPU-headroom.
+    set(PICO_HDMI_HSTX_CLK_DIV 2 CACHE STRING "HSTX clk div (252MHz/2 -> 25.2MHz pixel)" FORCE)
+    add_subdirectory(third_party/pico_hdmi)
+    target_link_libraries(BareMSX pico_hdmi)
+    target_compile_definitions(BareMSX PRIVATE BAREMSX_HDMI=1)
+else()
+    target_sources(BareMSX PRIVATE
+            lcd.c
+            audio.c
+    )
+    target_link_libraries(BareMSX hardware_spi hardware_pwm)
+endif()
+
+# Gemeenschappelijke libraries
+target_link_libraries(BareMSX
         hardware_i2c
         hardware_dma
-        hardware_pwm
         pico_cyw43_arch_none
         )
 
-pico_add_extra_outputs(PicoCalcMSX)
+pico_add_extra_outputs(BareMSX)
 

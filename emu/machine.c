@@ -12,10 +12,8 @@
 #include "PPI.h"
 #include <string.h>
 #include "konami-mega-rom-scc.h"
+#include "mapper.h"
 #include "emu2149.h"
-#include "bios_rom.h"
-#include "salamander.h"
-// #include "kvall2m1.h"
 #include "pico.h"
 
 // PicoCalc-port van machine.c (milestone 1: boot naar BASIC).
@@ -32,6 +30,7 @@ tms9918_context_t tms9918;
 tms9918_context_t tms9918_snap; // snapshot voor core 1 (blit) — vermijdt VDP-race
 ppi_context_t ppi;
 konami_scc_t konami_scc;
+mapper_t cart; // niet-SCC cartridge-mapper (plain/konami/ascii8/16)
 PSG *psg; // AY-3-8910 (emu2149, integer)
 
 uint8_t psg_register = 0;
@@ -97,21 +96,35 @@ static void __not_in_flash_func(write_port_impl)(uint8_t port, uint8_t value)
 static zuint8 zeta_in(void *ctx, zuint16 port) { (void)ctx; return read_port_impl((uint8_t)port); }
 static void zeta_out(void *ctx, zuint16 port, zuint8 value) { (void)ctx; write_port_impl((uint8_t)port, value); }
 
-bool machine_init(void)
+bool machine_init(const uint8_t *bios, uint32_t bios_size,
+                  const uint8_t *game, uint32_t game_size)
 {
+    (void)bios_size; // rom_read maskeert op 16-bit; de BIOS beslaat slot 0 (0x0000-0x7FFF)
+
     // Subslots in slot 3: subslot 2 = 64KB RAM (zoals de SDL-config)
     subslots_add_subslot(&subslots, 0, NULL, empty_read, empty_write);
     subslots_add_subslot(&subslots, 1, NULL, empty_read, empty_write);
     subslots_add_subslot(&subslots, 2, ram, ram_read, ram_write);
     subslots_add_subslot(&subslots, 3, NULL, empty_read, empty_write);
 
-    // Konami SCC cartridge (game uit flash) in slot 1
+    // SCC altijd initialiseren zodat scc_process (audio) veilig/stil is,
+    // ook als de game geen SCC gebruikt.
     scc_init(&konami_scc);
-    scc_set_rom(&konami_scc, (uint8_t *)game_rom, GAME_ROM_SIZE);
 
     // Primaire slots
-    slots_add_slot(&slots, 0, (void *)bios_rom, rom_read, rom_write);   // BIOS (flash)
-    slots_add_slot(&slots, 1, &konami_scc, scc_read, scc_write);        // SCC-cartridge
+    slots_add_slot(&slots, 0, (void *)bios, rom_read, rom_write);       // BIOS
+
+    mapper_type_t mt = mapper_detect(game, game_size);
+    printf("[machine] cartridge mapper: %s (%u bytes)\n", mapper_name(mt), (unsigned)game_size);
+    if (mt == MAPPER_KONAMI_SCC) {
+        scc_set_rom(&konami_scc, (uint8_t *)game, game_size);
+        slots_add_slot(&slots, 1, &konami_scc, scc_read, scc_write);
+    } else if (mt != MAPPER_NONE) {
+        mapper_init(&cart, game, game_size, mt);
+        slots_add_slot(&slots, 1, &cart, mapper_read, mapper_write);
+    } else {
+        slots_add_slot(&slots, 1, NULL, empty_read, empty_write);       // leeg -> BIOS-only
+    }
     slots_add_slot(&slots, 2, NULL, empty_read, empty_write);
     slots_add_slot(&slots, 3, &subslots, subslots_read, subslots_write);
 
@@ -217,7 +230,7 @@ static inline int16_t clamp16(int32_t v)
 
 // Mix-balans (twee knoppen) + master-volume tegen oversturing.
 // emu2149 geeft ~0..765; de SCC zit bij games vaak op bescheiden volumes.
-#define PSG_GAIN 16
+#define PSG_GAIN 8
 #define SCC_GAIN 2
 #define MASTER_NUM 3   // totaal op 75% voor headroom
 #define MASTER_DEN 4
