@@ -20,8 +20,27 @@
 
 // Menu-keuze die een flash-staging vereist, doorgegeven over een zachte reboot
 // heen (flashen kan alleen vóórdat de HSTX-video draait). scratch[0] = magic,
-// scratch[1] = index in de roms/-listing. (scratch[4..7] gebruikt de SDK zelf.)
+// scratch[1] = index in de roms/-listing, scratch[2] = index+1 in de dsk/-
+// listing (0 = geen disk). (scratch[4..7] gebruikt de SDK zelf.)
 #define BOOT_STAGE_MAGIC 0x53544147u // "STAG"
+
+// Is dit de DISK.ROM in system/? (naam begint met "disk", hoofdletterongevoelig)
+static bool is_disk_rom_name(const char *n)
+{
+    return (n[0] == 'd' || n[0] == 'D') && (n[1] == 'i' || n[1] == 'I') &&
+           (n[2] == 's' || n[2] == 'S') && (n[3] == 'k' || n[3] == 'K');
+}
+
+// Sector-IO voor de WD2793: leest/schrijft het geselecteerde .dsk-image op SD.
+static char g_dsk_name[STORAGE_MAX_NAME];
+static int dsk_sector_io(void *ctx, uint32_t lba, uint8_t *buf, bool write)
+{
+    (void)ctx;
+    long n = write
+        ? storage_write_at(SD_DSK, g_dsk_name, lba * 512u, buf, 512)
+        : storage_read_at(SD_DSK, g_dsk_name, lba * 512u, buf, 512);
+    return n == 512 ? 0 : -1;
+}
 #endif
 
 // BareMSX host (RP2350):
@@ -108,7 +127,15 @@ int main(void)
     // moment voor flash_range_erase/program.
     if (sd_ok && watchdog_hw->scratch[0] == BOOT_STAGE_MAGIC) {
         uint32_t idx = watchdog_hw->scratch[1];
+        uint32_t didx = watchdog_hw->scratch[2];
         watchdog_hw->scratch[0] = 0;
+        watchdog_hw->scratch[2] = 0;
+        // Disk A-keuze (index+1 in de dsk/-listing) mee over de reboot heen.
+        if (didx) {
+            int nd = storage_list(SD_DSK, ent, 64);
+            if ((int)(didx - 1) < nd && !ent[didx - 1].is_dir)
+                snprintf(g_dsk_name, sizeof g_dsk_name, "%s", ent[didx - 1].name);
+        }
         int nr = storage_list(SD_ROMS, ent, 64);
         if ((int)idx < nr && !ent[idx].is_dir)
             staged_game = flash_stage_rom(SD_ROMS, ent[idx].name, &staged_size);
@@ -118,12 +145,20 @@ int main(void)
     video_hstx_init();   // HDMI-output + core 1 starten (het menu rendert hierin)
 
 #ifdef BAREMSX_SD
+    static char diskrom_name[STORAGE_MAX_NAME];
     if (sd_ok) {
-        // BIOS uit system/ (eerste bestand), gepad naar 64KB.
+        // system/: eerste bestand dat NIET "disk..." heet = BIOS (gepad naar
+        // 64KB); eerste dat wél zo heet = DISK.ROM (optioneel).
         char bios_name[STORAGE_MAX_NAME] = "";
         int ns = storage_list(SD_SYSTEM, ent, 64);
-        for (int i = 0; i < ns; i++)
-            if (!ent[i].is_dir) { snprintf(bios_name, sizeof bios_name, "%s", ent[i].name); break; }
+        for (int i = 0; i < ns; i++) {
+            if (ent[i].is_dir) continue;
+            if (is_disk_rom_name(ent[i].name)) {
+                if (!diskrom_name[0]) snprintf(diskrom_name, sizeof diskrom_name, "%s", ent[i].name);
+            } else if (!bios_name[0]) {
+                snprintf(bios_name, sizeof bios_name, "%s", ent[i].name);
+            }
+        }
         if (bios_name[0]) {
             memset(sd_bios, 0xFF, sizeof sd_bios);
             storage_read(SD_SYSTEM, bios_name, sd_bios, sizeof sd_bios);
@@ -148,6 +183,9 @@ int main(void)
                 }
                 usbkbd_menu_mode(false);
 
+                if (cfg.diskA[0])
+                    snprintf(g_dsk_name, sizeof g_dsk_name, "%s", cfg.diskA);
+
                 use_game = NULL;
                 use_game_size = 0;
                 if (cfg.slot1[0]) {
@@ -164,11 +202,19 @@ int main(void)
                     //    watchdog-scratch en zachte reboot; de staging draait
                     //    dan vóór de video-init (zie boven).
                     if (!use_game) {
+                        // Disk A-keuze als dsk/-index+1 mee de reboot over.
+                        uint32_t didx = 0;
+                        if (cfg.diskA[0]) {
+                            int nd = storage_list(SD_DSK, ent, 64);
+                            for (int i = 0; i < nd; i++)
+                                if (!ent[i].is_dir && strcmp(ent[i].name, cfg.diskA) == 0) { didx = (uint32_t)i + 1; break; }
+                        }
                         int nr = storage_list(SD_ROMS, ent, 64);
                         for (int i = 0; i < nr; i++) {
                             if (!ent[i].is_dir && strcmp(ent[i].name, cfg.slot1) == 0) {
                                 watchdog_hw->scratch[0] = BOOT_STAGE_MAGIC;
                                 watchdog_hw->scratch[1] = (uint32_t)i;
+                                watchdog_hw->scratch[2] = didx;
                                 watchdog_reboot(0, 0, 0);
                                 while (true) tight_loop_contents();
                             }
@@ -176,6 +222,29 @@ int main(void)
                     }
                 }
             }
+        }
+    }
+
+    // Disk-interface (slot 2): DISK.ROM uit system/ + gekozen .dsk als drive A.
+    static uint8_t disk_rom[16384];
+    if (sd_ok && diskrom_name[0]) {
+        long drs = storage_read(SD_SYSTEM, diskrom_name, disk_rom, sizeof disk_rom);
+        if (drs > 0) {
+            uint8_t sides = 0;
+            uint32_t total_sectors = 0;
+            if (g_dsk_name[0]) {
+                long dsz = storage_size(SD_DSK, g_dsk_name);
+                if (dsz > 0) {
+                    total_sectors = (uint32_t)dsz / 512u;
+                    sides = (dsz <= 80 * 9 * 512) ? 1 : 2; // 360KB enkel-, 720KB dubbelzijdig
+                } else {
+                    g_dsk_name[0] = 0; // dsk verdwenen -> lege drive
+                }
+            }
+            machine_attach_disk(disk_rom, (uint32_t)drs, sides, total_sectors,
+                                NULL, dsk_sector_io);
+            printf("[boot] disk: %s, drive A: %s\n", diskrom_name,
+                   g_dsk_name[0] ? g_dsk_name : "(leeg)");
         }
     }
 #endif
