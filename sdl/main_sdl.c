@@ -105,18 +105,19 @@ int main(int argc, char **argv)
 
     // Testvlaggen: --slot1/--diska prefillen de menukeuze en slaan het menu
     // over; --frames N + --dump pad = headless draaien en het scherm dumpen.
-    const char *arg_slot1 = NULL, *arg_diska = NULL, *arg_dump = NULL;
+    const char *arg_slot1 = NULL, *arg_slot2 = NULL, *arg_diska = NULL, *arg_dump = NULL;
     int arg_frames = 0, arg_press = 0;
     bool arg_nomenu = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--slot1") && i + 1 < argc) arg_slot1 = argv[++i];
+        else if (!strcmp(argv[i], "--slot2") && i + 1 < argc) arg_slot2 = argv[++i];
         else if (!strcmp(argv[i], "--diska") && i + 1 < argc) arg_diska = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) arg_frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) arg_dump = argv[++i];
         else if (!strcmp(argv[i], "--press") && i + 1 < argc) arg_press = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nomenu")) arg_nomenu = true;
     }
-    if (arg_slot1 || arg_diska) arg_nomenu = true;
+    if (arg_slot1 || arg_slot2 || arg_diska) arg_nomenu = true;
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -193,6 +194,7 @@ int main(int argc, char **argv)
     memset(&cfg, 0, sizeof cfg);
     menu_init(bios, &cfg);
     if (arg_slot1) snprintf(cfg.slot1, sizeof cfg.slot1, "%s", arg_slot1);
+    if (arg_slot2) snprintf(cfg.slot2, sizeof cfg.slot2, "%s", arg_slot2);
     if (arg_diska) snprintf(cfg.diskA, sizeof cfg.diskA, "%s", arg_diska);
     while (!arg_nomenu && !menu_start_requested()) {
         SDL_Event e;
@@ -219,13 +221,22 @@ int main(int argc, char **argv)
         SDL_Delay(16);
     }
 
-    // --- Load the chosen cartridge (slot 1) and boot ---
+    // --- Load the chosen cartridges (slot 1 + 2) and boot ---
     uint8_t *game = NULL;
     uint32_t game_size = 0;
     if (cfg.slot1[0]) {
         game = storage_load(SD_ROMS, cfg.slot1, &game_size);
         if (!game) {
             fprintf(stderr, "failed to load roms/%s\n", cfg.slot1);
+            return 1;
+        }
+    }
+    uint8_t *game2 = NULL;
+    uint32_t game2_size = 0;
+    if (cfg.slot2[0]) {
+        game2 = storage_load(SD_ROMS, cfg.slot2, &game2_size);
+        if (!game2) {
+            fprintf(stderr, "failed to load roms/%s\n", cfg.slot2);
             return 1;
         }
     }
@@ -248,12 +259,13 @@ int main(int argc, char **argv)
                             NULL, dsk_sector_io);
     }
 
-    printf("BIOS: system/%s   diskrom: %s   slot1: %s (%u bytes)   diskA: %s\n",
+    printf("BIOS: system/%s   diskrom: %s   slot1: %s (%u)   slot2: %s (%u)   diskA: %s\n",
            bios_name, diskrom_name[0] ? diskrom_name : "(none)",
            cfg.slot1[0] ? cfg.slot1 : "(empty)", game_size,
+           cfg.slot2[0] ? cfg.slot2 : "(empty)", game2_size,
            cfg.diskA[0] ? cfg.diskA : "(empty)");
 
-    if (!machine_init(bios, sizeof bios, game, game_size)) {
+    if (!machine_init(bios, sizeof bios, game, game_size, game2, game2_size)) {
         fprintf(stderr, "machine_init failed\n");
         return 1;
     }
@@ -272,6 +284,15 @@ int main(int argc, char **argv)
                 memcpy(&fb[y * MSX_W], line, sizeof(line));
             }
             if (arg_dump) dump_ppm(arg_dump, fb);
+            {
+                extern uint8_t ram[];
+                fprintf(stderr, "[ram] 5650:");
+                for (int i = 0x5650; i < 0x5680; i++) fprintf(stderr, " %02X", ram[i]);
+                fprintf(stderr, "\n[ram] FC9E jiffy: %02X %02X\n", ram[0xFC9E], ram[0xFC9F]);
+                fprintf(stderr, "[ram] RAMAD0-3: %02X %02X %02X %02X  EXPTBL: %02X %02X %02X %02X\n",
+                        ram[0xF341], ram[0xF342], ram[0xF343], ram[0xF344],
+                        ram[0xFCC1], ram[0xFCC2], ram[0xFCC3], ram[0xFCC4]);
+            }
             break;
         }
         frame_no++;

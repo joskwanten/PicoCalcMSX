@@ -14,8 +14,11 @@
 // Initialiseer de machine met een BIOS (slot 0) en een cartridge-ROM (slot 1).
 // De ROM-data leeft buiten de core (baked-in flash op de Pico, of geladen van
 // de sdcard) — de aanroeper levert de pointers + groottes.
+// game = cartridge in slot 1, game2 = cartridge in slot 2 (beide optioneel,
+// NULL/0 = leeg). Een SCC-game in slot 2 bankt wel maar heeft geen SCC-geluid.
 bool machine_init(const uint8_t *bios, uint32_t bios_size,
-                  const uint8_t *game, uint32_t game_size);
+                  const uint8_t *game, uint32_t game_size,
+                  const uint8_t *game2, uint32_t game2_size);
 
 // Optioneel, aanroepen VÓÓR machine_init: hang een disk-interface in slot 2
 // (DISK.ROM op 0x4000-0x7FFF + WD2793 memory-mapped op 0x7FF8-0x7FFF).

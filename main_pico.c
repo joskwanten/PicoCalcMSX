@@ -113,6 +113,8 @@ int main(void)
     const uint8_t *use_game = NULL;
     uint32_t use_game_size = 0;
 #endif
+    const uint8_t *use_game2 = NULL;
+    uint32_t use_game2_size = 0;
 
 #ifdef BAREMSX_SD
     static uint8_t sd_bios[65536];
@@ -125,11 +127,14 @@ int main(void)
     // Reboot-staging: als het menu vóór de reboot een (grote) ROM koos, flash
     // die dan NU — de HSTX-video draait nog niet, dus dit is het enige veilige
     // moment voor flash_range_erase/program.
+    uint32_t s2idx = 0; // slot 2-keuze (roms-index+1) over de reboot heen
     if (sd_ok && watchdog_hw->scratch[0] == BOOT_STAGE_MAGIC) {
         uint32_t idx = watchdog_hw->scratch[1];
         uint32_t didx = watchdog_hw->scratch[2];
+        s2idx = watchdog_hw->scratch[3];
         watchdog_hw->scratch[0] = 0;
         watchdog_hw->scratch[2] = 0;
+        watchdog_hw->scratch[3] = 0;
         // Disk A-keuze (index+1 in de dsk/-listing) mee over de reboot heen.
         if (didx) {
             int nd = storage_list(SD_DSK, ent, 64);
@@ -169,6 +174,11 @@ int main(void)
                 // Zojuist gestaged (na de menu-reboot): direct booten, geen menu.
                 use_game = staged_game;
                 use_game_size = staged_size;
+                if (s2idx) { // slot 2-keuze van vóór de reboot herstellen
+                    int nr = storage_list(SD_ROMS, ent, 64);
+                    if ((int)(s2idx - 1) < nr && !ent[s2idx - 1].is_dir)
+                        snprintf(cfg.slot2, sizeof cfg.slot2, "%s", ent[s2idx - 1].name);
+                }
             } else {
                 // Boot-menu (USB-keyboard bestuurt 'm; rendert in de HDMI-backbuffer).
                 memset(&cfg, 0, sizeof cfg);
@@ -202,19 +212,24 @@ int main(void)
                     //    watchdog-scratch en zachte reboot; de staging draait
                     //    dan vóór de video-init (zie boven).
                     if (!use_game) {
-                        // Disk A-keuze als dsk/-index+1 mee de reboot over.
-                        uint32_t didx = 0;
+                        // Disk A- en slot 2-keuzes als listing-index+1 mee de reboot over.
+                        uint32_t didx = 0, sidx2 = 0;
                         if (cfg.diskA[0]) {
                             int nd = storage_list(SD_DSK, ent, 64);
                             for (int i = 0; i < nd; i++)
                                 if (!ent[i].is_dir && strcmp(ent[i].name, cfg.diskA) == 0) { didx = (uint32_t)i + 1; break; }
                         }
                         int nr = storage_list(SD_ROMS, ent, 64);
+                        if (cfg.slot2[0]) {
+                            for (int i = 0; i < nr; i++)
+                                if (!ent[i].is_dir && strcmp(ent[i].name, cfg.slot2) == 0) { sidx2 = (uint32_t)i + 1; break; }
+                        }
                         for (int i = 0; i < nr; i++) {
                             if (!ent[i].is_dir && strcmp(ent[i].name, cfg.slot1) == 0) {
                                 watchdog_hw->scratch[0] = BOOT_STAGE_MAGIC;
                                 watchdog_hw->scratch[1] = (uint32_t)i;
                                 watchdog_hw->scratch[2] = didx;
+                                watchdog_hw->scratch[3] = sidx2;
                                 watchdog_reboot(0, 0, 0);
                                 while (true) tight_loop_contents();
                             }
@@ -225,7 +240,18 @@ int main(void)
         }
     }
 
-    // Disk-interface (slot 2): DISK.ROM uit system/ + gekozen .dsk als drive A.
+    // Slot 2-cartridge: klein en via RAM (geen flash-staging voor slot 2).
+    if (sd_ok && cfg.slot2[0]) {
+        long sz2 = storage_size(SD_ROMS, cfg.slot2);
+        if (sz2 > 0 && sz2 <= 48 * 1024)
+            use_game2 = storage_load(SD_ROMS, cfg.slot2, &use_game2_size);
+        if (!use_game2) {
+            printf("[boot] slot 2: %s laadt niet (max 48KB via RAM) -> leeg\n", cfg.slot2);
+            use_game2_size = 0;
+        }
+    }
+
+    // Disk-interface (subslot 3-3): DISK.ROM uit system/ + gekozen .dsk als drive A.
     static uint8_t disk_rom[16384];
     if (sd_ok && diskrom_name[0]) {
         long drs = storage_read(SD_SYSTEM, diskrom_name, disk_rom, sizeof disk_rom);
@@ -263,7 +289,8 @@ int main(void)
         }
     }
 
-    if (!machine_init(use_bios, use_bios_size, use_game, use_game_size)) {
+    if (!machine_init(use_bios, use_bios_size, use_game, use_game_size,
+                      use_game2, use_game2_size)) {
         while (true) tight_loop_contents();
     }
 

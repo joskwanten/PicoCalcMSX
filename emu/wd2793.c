@@ -143,6 +143,11 @@ static void command(wd2793_t *fdc, uint8_t cmd)
         break;
     // Type IV — FORCE INTERRUPT: breek af wat er loopt.
     case 0xD:
+#ifdef WD_DEBUG
+        if (fdc->tmode != WD_T_NONE)
+            fprintf(stderr, "[fdc]   D0 aborts transfer: mode=%d pos=%u/%u\n",
+                    fdc->tmode, fdc->tpos, fdc->tlen);
+#endif
         fdc->tmode = WD_T_NONE;
         fdc->status = 0;
         fdc->type1_status = true;

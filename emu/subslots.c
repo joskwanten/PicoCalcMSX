@@ -19,6 +19,10 @@ uint8_t __not_in_flash_func(subslots_read)(void* context, uint16_t address)
 void __not_in_flash_func(subslots_write)(void* context, uint16_t address, uint8_t value)
 {
     if (address == 0xffff) {
+#ifdef SLOT_DEBUG
+        fprintf(stderr, "[subslot] reg %02X -> %02X\n",
+                ((subslot_context_t *)context)->subslot_register, value);
+#endif
         ((subslot_context_t *)context)->subslot_register = value;
     } 
     else 

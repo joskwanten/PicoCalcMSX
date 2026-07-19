@@ -30,8 +30,14 @@ hence the git history — but is now HDMI-first.)
   once (~2 s) to write flash safely; picking it again boots instantly.
 - **Dual-core** — core 0 emulates, core 1 streams the HSTX video.
 
-Status: work in progress. MSX1 only (MSX2/V9938 is on the roadmap); the
-Disk A/B menu entries are UI-only for now.
+- **Floppy disks** — the Disk A menu entry boots .dsk images (360/720 KB)
+  through an emulated WD2793 + your DISK.ROM; sector writes go back into
+  the image, so games can save. Needs a real MSX1 BIOS — C-BIOS cannot
+  boot disks.
+
+Status: work in progress. MSX1 only (MSX2/V9938 is on the roadmap).
+Current limitations: Disk B is UI-only, and a slot 2 cartridge and the
+disk drive can't be used at the same time (slot 2 is shared).
 
 ## Hardware
 
@@ -83,15 +89,18 @@ on VSYS alone is not enough.
 ## SD card layout
 
 ```
-/system/   system ROMs — the first file found is used as the MSX BIOS
+/system/   MSX BIOS + DISK.ROM (see below)
 /roms/     cartridge ROM images (.rom)
-/dsk/      disk images (future)
+/dsk/      floppy images (.dsk, 360/720 KB raw sector dumps)
 /hdd/      Nextor hard-disk images (future)
 ```
 
-No ROMs are distributed with this project. For a fully free setup, use the
-open-source [C-BIOS](https://cbios.sourceforge.net/) (`cbios_main_msx1.rom`)
-as the BIOS; otherwise dump the BIOS of a machine you own.
+In `system/`, the first file whose name starts with `disk` is used as the
+DISK.ROM (e.g. a Philips NMS-8245 `DISK.ROM`, WD2793-based); the first
+other file is the MSX BIOS. No ROMs are distributed with this project.
+For a cartridge-only setup the free [C-BIOS](https://cbios.sourceforge.net/)
+(`cbios_main_msx1.rom`) works fine; for floppy disks you need the BIOS of
+a real MSX1 (C-BIOS cannot boot disks) — dump one from a machine you own.
 
 ### Boot menu
 

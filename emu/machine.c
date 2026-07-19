@@ -26,12 +26,13 @@ uint8_t ram[0x10000];   // MSX RAM in SRAM
 Z80 cpu;
 
 slots_context_t slots;
-subslot_context_t subslots;
+static subslot_context_t subslots3; // slot 3: RAM op 3-2 (NMS-8245-stijl)
 tms9918_context_t tms9918;
 tms9918_context_t tms9918_snap; // snapshot voor core 1 (blit) — vermijdt VDP-race
 ppi_context_t ppi;
 konami_scc_t konami_scc;
-mapper_t cart; // niet-SCC cartridge-mapper (plain/konami/ascii8/16)
+mapper_t cart;  // slot 1-cartridge-mapper (plain/konami/ascii8/16)
+mapper_t cart2; // slot 2-cartridge-mapper (paging only — SCC-geluid is slot 1)
 PSG *psg; // AY-3-8910 (emu2149, integer)
 
 // Disk-interface (slot 2), optioneel: gezet via machine_attach_disk vóór
@@ -113,15 +114,10 @@ static zuint8 zeta_in(void *ctx, zuint16 port) { (void)ctx; return read_port_imp
 static void zeta_out(void *ctx, zuint16 port, zuint8 value) { (void)ctx; write_port_impl((uint8_t)port, value); }
 
 bool machine_init(const uint8_t *bios, uint32_t bios_size,
-                  const uint8_t *game, uint32_t game_size)
+                  const uint8_t *game, uint32_t game_size,
+                  const uint8_t *game2, uint32_t game2_size)
 {
     (void)bios_size; // rom_read maskeert op 16-bit; de BIOS beslaat slot 0 (0x0000-0x7FFF)
-
-    // Subslots in slot 3: subslot 2 = 64KB RAM (zoals de SDL-config)
-    subslots_add_subslot(&subslots, 0, NULL, empty_read, empty_write);
-    subslots_add_subslot(&subslots, 1, NULL, empty_read, empty_write);
-    subslots_add_subslot(&subslots, 2, ram, ram_read, ram_write);
-    subslots_add_subslot(&subslots, 3, NULL, empty_read, empty_write);
 
     // SCC altijd initialiseren zodat scc_process (audio) veilig/stil is,
     // ook als de game geen SCC gebruikt.
@@ -141,14 +137,39 @@ bool machine_init(const uint8_t *bios, uint32_t bios_size,
     } else {
         slots_add_slot(&slots, 1, NULL, empty_read, empty_write);       // leeg -> BIOS-only
     }
-    if (disk_attached) {
+    // Slot 2: tweede cartridge, of anders de disk-interface (DISK.ROM +
+    // WD2793 op 0x7FF8-0x7FFF). Een SCC-game hier bankt via de generieke
+    // mapper maar klinkt niet — SCC-geluid zit op slot 1.
+    // KNOWN ISSUE: de disk-interface in een GEËXPANDEERD slot (2-1 of 3-3)
+    // ontspoort nog (inter-slot-calls van de MSX1-BIOS naar de DISK.ROM);
+    // daarom is "cartridge 2 + disk tegelijk" nu niet mogelijk. Uitzoeken
+    // vóór MSX2/Nextor.
+    mapper_type_t mt2 = mapper_detect(game2, game2_size);
+    if (mt2 != MAPPER_NONE) {
+        printf("[machine] slot 2 mapper: %s (%u bytes)\n", mapper_name(mt2), (unsigned)game2_size);
+        if (disk_attached)
+            printf("[machine] disk uitgeschakeld: slot 2 is bezet door cartridge 2\n");
+        mapper_init(&cart2, game2, game2_size, mt2);
+        slots_add_slot(&slots, 2, &cart2, mapper_read, mapper_write);
+    } else if (disk_attached) {
         printf("[machine] disk interface in slot 2 (%u KB DISK.ROM, %u sides)\n",
                (unsigned)(diskrom.rom_size / 1024), diskrom.fdc.sides);
         slots_add_slot(&slots, 2, &diskrom, diskrom_read, diskrom_write);
     } else {
         slots_add_slot(&slots, 2, NULL, empty_read, empty_write);
     }
-    slots_add_slot(&slots, 3, &subslots, subslots_read, subslots_write);
+
+    // Slot 3: 64KB RAM op subslot 3-2 (geëxpandeerd, NMS-8245-stijl).
+    // NB: met plat 64KB-RAM in slot 3 activeert de DISK.ROM zijn MSX-DOS-
+    // bootfase en die ontspoort nu nog in de emulatie (banner-corruptie,
+    // EXPTBL stuk) — uitzoeken vóór Nextor-support. Expanded RAM neemt het
+    // Disk BASIC-pad en dat werkt.
+    subslots3.subslot_register = 0;
+    subslots_add_subslot(&subslots3, 0, NULL, empty_read, empty_write);
+    subslots_add_subslot(&subslots3, 1, NULL, empty_read, empty_write);
+    subslots_add_subslot(&subslots3, 2, ram, ram_read, ram_write);
+    subslots_add_subslot(&subslots3, 3, NULL, empty_read, empty_write);
+    slots_add_slot(&slots, 3, &subslots3, subslots_read, subslots_write);
 
     cpu.context = &slots;
     cpu.fetch_opcode = cpu.fetch = cpu.nop = cpu.read = (Z80Read)slots_read;
@@ -198,7 +219,7 @@ void machine_dbg_dump(void)
            Z80_A(cpu), Z80_BC(cpu), Z80_DE(cpu), Z80_HL(cpu),
            Z80_SP(cpu), Z80_IX(cpu), Z80_IY(cpu), cpu.iff1, cpu.im);
     printf("  slotreg=%02X subslotreg=%02X vdpStatus=%02X\n",
-           slots_get_slot_register(&slots), subslots.subslot_register, tms9918.vdpStatus);
+           slots_get_slot_register(&slots), subslots3.subslot_register, tms9918.vdpStatus);
     printf("  @0000:");
     for (int k = 0; k < 8; k++) printf(" %02X", slots_read(&slots, (uint16_t)k));
     printf("  @0038:");

@@ -20,7 +20,10 @@ void __not_in_flash_func(slots_write)(void* slots_context, uint16_t address, uin
 }
 
 void slots_set_slot_register(slots_context_t* slots_context, uint8_t value) {
-    // printf("Slot value %x\n", value);
+#ifdef SLOT_DEBUG
+    fprintf(stderr, "[a8] %02X (p0=%d p1=%d p2=%d p3=%d)\n", value,
+            value & 3, (value >> 2) & 3, (value >> 4) & 3, (value >> 6) & 3);
+#endif
     slots_context->selected_slots[0] = value & 3;
     slots_context->selected_slots[1] = (value >> 2) & 3;
     slots_context->selected_slots[2] = (value >> 4) & 3;

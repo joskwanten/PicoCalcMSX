@@ -25,6 +25,7 @@ void mapper_init(mapper_t *m, const uint8_t *rom, uint32_t size, mapper_type_t t
     for (int i = 0; i < 8; i++) m->page[i] = 0;
     switch (type) {
     case MAPPER_KONAMI:   // 0x4000 fixed at bank 0; others default to 1,2,3
+    case MAPPER_KONAMI_SCC:
         m->page[2] = 0; m->page[3] = 1; m->page[4] = 2; m->page[5] = 3;
         break;
     case MAPPER_ASCII16:  // 16K bank 0 = 8K banks 0,1 in both windows
@@ -70,6 +71,15 @@ void __not_in_flash_func(mapper_write)(void *context, uint16_t address, uint8_t 
             m->page[4] = (uint8_t)(value * 2);
             m->page[5] = (uint8_t)(value * 2 + 1);
         }
+        break;
+    case MAPPER_KONAMI_SCC:
+        // Alleen de paging (bankregisters op 0x5000/0x7000/0x9000/0xB000);
+        // SCC-gelúid zit in het aparte konami_scc-device (slot 1). Deze route
+        // wordt gebruikt voor een SCC-game in slot 2.
+        if (address >= 0x5000 && address < 0x5800) m->page[2] = value;
+        else if (address >= 0x7000 && address < 0x7800) m->page[3] = value;
+        else if (address >= 0x9000 && address < 0x9800) m->page[4] = value;
+        else if (address >= 0xB000 && address < 0xB800) m->page[5] = value;
         break;
     default:
         break;
