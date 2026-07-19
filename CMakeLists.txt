@@ -94,6 +94,20 @@ target_compile_definitions(PicoCalcMSX PRIVATE Z80_STATIC)
 # niet panicken (SDK-default) — dat gaf een stille lockup bij grote ROMs.
 target_compile_definitions(PicoCalcMSX PRIVATE PICO_MALLOC_PANIC=0)
 
+# Ingebakken fallback-ROMs (emu/bios_rom.h + emu/nemesis2.h; zelf genereren met
+# tools/rom_to_header.py — zitten niet in git). Zonder deze optie bevat de
+# binary géén copyrighted materiaal (publiceerbare build) en is een SD-kaart
+# met een BIOS in system/ vereist. Default: aan als de headers bestaan.
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/emu/bios_rom.h AND EXISTS ${CMAKE_CURRENT_LIST_DIR}/emu/nemesis2.h)
+    set(_baked_default ON)
+else()
+    set(_baked_default OFF)
+endif()
+option(PICOCALC_BAKED_ROMS "Bake fallback BIOS+game ROM headers into the binary" ${_baked_default})
+if(PICOCALC_BAKED_ROMS)
+    target_compile_definitions(PicoCalcMSX PRIVATE PICOCALC_BAKED_ROMS=1)
+endif()
+
 if(PICOCALC_I2C_KEYBOARD)
     target_compile_definitions(PicoCalcMSX PRIVATE PICOCALC_I2C_KEYBOARD=1)
 endif()

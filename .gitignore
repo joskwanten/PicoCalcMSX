@@ -1,5 +1,5 @@
 # Build output
-build/
+build*/
 build-hdmi/
 
 # Third-party Zeta Z80 core — fetched via tools/setup-zeta.sh (see README)

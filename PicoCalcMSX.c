@@ -3,8 +3,10 @@
 #include "pico/multicore.h"
 #include "hardware/sync.h" // __dmb
 #include "machine.h"
-#include "bios_rom.h"  // baked-in BIOS (flash) — SD-loading komt later
-#include "nemesis2.h"  // baked-in cartridge-ROM
+#ifdef PICOCALC_BAKED_ROMS
+#include "bios_rom.h"  // ingebakken fallback-BIOS (zelf genereren, zie README)
+#include "nemesis2.h"  // ingebakken fallback-cartridge
+#endif
 #include "i2ckbd.h"
 #include "keymap.h"
 #include "keycodes.h"
@@ -240,10 +242,19 @@ int main(void)
 #endif
 
     // BIOS + game bepalen: van SD (met boot-menu) of ingebakken als fallback.
+#ifdef PICOCALC_BAKED_ROMS
     const uint8_t *use_bios = bios_rom;
     uint32_t use_bios_size = BIOS_ROM_SIZE;
     const uint8_t *use_game = game_rom;
     uint32_t use_game_size = GAME_ROM_SIZE;
+#else
+    // Publiceerbare build: geen copyrighted materiaal in de binary; de BIOS
+    // móet dan van de SD-kaart komen (system/).
+    const uint8_t *use_bios = NULL;
+    uint32_t use_bios_size = 0;
+    const uint8_t *use_game = NULL;
+    uint32_t use_game_size = 0;
+#endif
 
 #if defined(PICOCALC_HDMI) && defined(PICOCALC_SD)
     static uint8_t sd_bios[65536];
@@ -331,6 +342,24 @@ int main(void)
         }
     }
 #endif
+
+    if (!use_bios) {
+        // Geen BIOS beschikbaar: geen (leesbare) SD-kaart en geen ingebakken
+        // fallback. Effen MSX-blauw scherm als "plaats een SD-kaart"-signaal.
+        printf("[boot] no BIOS: insert an SD card with system/<bios>.rom\n");
+#ifdef PICOCALC_HDMI
+        while (true) {
+            uint16_t *bb = video_hstx_backbuffer();
+            if (bb) {
+                for (int i = 0; i < MSX_W * MSX_H; i++) bb[i] = 0x52BD;
+                video_hstx_present(0x52BD);
+            }
+            tight_loop_contents();
+        }
+#else
+        while (true) tight_loop_contents();
+#endif
+    }
 
     if (!machine_init(use_bios, use_bios_size, use_game, use_game_size)) {
 #ifndef PICOCALC_HDMI
