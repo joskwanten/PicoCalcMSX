@@ -9,6 +9,7 @@
 
 #include "machine.h"
 #include "storage.h"
+#include "menu.h"
 
 #include <stdlib.h>
 
@@ -88,22 +89,19 @@ int main(int argc, char **argv)
     if (!storage_init())
         return 1;
 
+    // Framebuffer + audio buffers (fb is also used to render the menu).
+    static uint32_t fb[MSX_W * MSX_H];
+    static uint32_t line[MSX_W];
+    static int16_t audio[AUDIO_SAMPLES_PER_FRAME * 2];
+
     storage_entry_t ent[128];
-    char bios_name[STORAGE_MAX_NAME] = "", game_name[STORAGE_MAX_NAME] = "";
+    char bios_name[STORAGE_MAX_NAME] = "";
 
     int ns = storage_list(SD_SYSTEM, ent, 128);
     for (int i = 0; i < ns; i++)
         if (!ent[i].is_dir) { snprintf(bios_name, sizeof bios_name, "%s", ent[i].name); break; }
     if (!bios_name[0]) {
         fprintf(stderr, "no BIOS found in sdcard/%s/\n", SD_SYSTEM);
-        return 1;
-    }
-
-    int nr = storage_list(SD_ROMS, ent, 128);
-    for (int i = 0; i < nr; i++)
-        if (!ent[i].is_dir) { snprintf(game_name, sizeof game_name, "%s", ent[i].name); break; }
-    if (!game_name[0]) {
-        fprintf(stderr, "no game found in sdcard/%s/\n", SD_ROMS);
         return 1;
     }
 
@@ -115,22 +113,51 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    uint32_t game_size = 0;
-    uint8_t *game = storage_load(SD_ROMS, game_name, &game_size);
-    if (!game) {
-        fprintf(stderr, "failed to load game %s\n", game_name);
-        return 1;
+    // --- Boot menu: pick cartridges / disks ---
+    menu_config_t cfg;
+    memset(&cfg, 0, sizeof cfg);
+    menu_init(bios, &cfg);
+    while (!menu_start_requested()) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) { SDL_Quit(); return 0; }
+            if (e.type == SDL_KEYDOWN && !e.key.repeat) {
+                switch (e.key.keysym.scancode) {
+                case SDL_SCANCODE_UP:     menu_input(MENU_UP); break;
+                case SDL_SCANCODE_DOWN:   menu_input(MENU_DOWN); break;
+                case SDL_SCANCODE_RETURN:
+                case SDL_SCANCODE_KP_ENTER:
+                case SDL_SCANCODE_SPACE:  menu_input(MENU_ENTER); break;
+                case SDL_SCANCODE_ESCAPE: menu_input(MENU_BACK); break;
+                default: break;
+                }
+            }
+        }
+        menu_render(fb);
+        SDL_UpdateTexture(tex, NULL, fb, MSX_W * (int)sizeof(uint32_t));
+        SDL_RenderClear(ren);
+        SDL_RenderCopy(ren, tex, NULL, NULL);
+        SDL_RenderPresent(ren);
+        SDL_Delay(16);
     }
-    printf("BIOS: system/%s   game: roms/%s (%u bytes)\n", bios_name, game_name, game_size);
+
+    // --- Load the chosen cartridge (slot 1) and boot ---
+    uint8_t *game = NULL;
+    uint32_t game_size = 0;
+    if (cfg.slot1[0]) {
+        game = storage_load(SD_ROMS, cfg.slot1, &game_size);
+        if (!game) {
+            fprintf(stderr, "failed to load roms/%s\n", cfg.slot1);
+            return 1;
+        }
+    }
+    printf("BIOS: system/%s   slot1: %s (%u bytes)\n",
+           bios_name, cfg.slot1[0] ? cfg.slot1 : "(empty)", game_size);
 
     if (!machine_init(bios, sizeof bios, game, game_size)) {
         fprintf(stderr, "machine_init failed\n");
         return 1;
     }
-
-    static uint32_t fb[MSX_W * MSX_H];
-    static uint32_t line[MSX_W];
-    static int16_t audio[AUDIO_SAMPLES_PER_FRAME * 2];
 
     const double freq = (double)SDL_GetPerformanceFrequency();
     uint64_t next = SDL_GetPerformanceCounter();

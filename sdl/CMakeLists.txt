@@ -15,6 +15,7 @@ set(ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 add_executable(msx_sdl
     main_sdl.c
     storage_host.c
+    ${ROOT}/menu.c
     ${ROOT}/emu/machine.c
     ${ROOT}/zeta/Z80.c
     ${ROOT}/emu/tms9918.c

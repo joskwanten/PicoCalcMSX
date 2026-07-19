@@ -105,13 +105,16 @@ bool machine_init(const uint8_t *bios, uint32_t bios_size,
     subslots_add_subslot(&subslots, 2, ram, ram_read, ram_write);
     subslots_add_subslot(&subslots, 3, NULL, empty_read, empty_write);
 
-    // Konami SCC cartridge in slot 1 (TODO: mapper-selectie per game)
-    scc_init(&konami_scc);
-    scc_set_rom(&konami_scc, (uint8_t *)game, game_size);
-
     // Primaire slots
     slots_add_slot(&slots, 0, (void *)bios, rom_read, rom_write);       // BIOS
-    slots_add_slot(&slots, 1, &konami_scc, scc_read, scc_write);        // SCC-cartridge
+    if (game && game_size) {
+        // Konami SCC cartridge in slot 1 (TODO: mapper-selectie per game)
+        scc_init(&konami_scc);
+        scc_set_rom(&konami_scc, (uint8_t *)game, game_size);
+        slots_add_slot(&slots, 1, &konami_scc, scc_read, scc_write);
+    } else {
+        slots_add_slot(&slots, 1, NULL, empty_read, empty_write);       // leeg -> BIOS-only
+    }
     slots_add_slot(&slots, 2, NULL, empty_read, empty_write);
     slots_add_slot(&slots, 3, &subslots, subslots_read, subslots_write);
 
