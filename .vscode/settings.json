@@ -23,7 +23,6 @@
     "cmake.configureOnOpen": false,
     "cmake.generator": "Ninja",
     "cmake.configureSettings": {
-        "BAREMSX_HDMI": "ON"
     },
     "cmake.cmakePath": "${userHome}/.pico-sdk/cmake/v4.3.4/bin/cmake",
     "C_Cpp.debugShortcut": false,

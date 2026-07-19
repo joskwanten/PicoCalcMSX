@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 // HDMI/DVI display backend (RP2350 HSTX via the pico_hdmi library).
-// Replaces the SPI-LCD path when the project is built with -DBAREMSX_HDMI.
+// De enige video-backend: DVI/HDMI uit de RP2350 HSTX (via pico_hdmi).
 //
 // The MSX image is 256x192. It is rendered by core 0 into an RGB565 back
 // buffer, integer-scaled 2x to 512x384 and centered in a 640x480 @ 60 Hz

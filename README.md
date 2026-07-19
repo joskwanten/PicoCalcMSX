@@ -7,8 +7,9 @@ a classic MSX-styled boot menu.
 Plug it into a monitor, put your ROMs on an SD card, and play — Konami SCC
 games (Nemesis, Salamander, F1 Spirit, ...) run at a locked 60 Hz with sound.
 
-There is also an SDL2 desktop build for development, and a legacy LCD backend
-for the [ClockworkPi PicoCalc](https://www.clockworkpi.com/picocalc).
+There is also an SDL2 desktop build for development. (The project started as
+an emulator for the [ClockworkPi PicoCalc](https://www.clockworkpi.com/picocalc) —
+hence the git history — but is now HDMI-first.)
 
 ## Features
 
@@ -126,7 +127,6 @@ Drop `build/BareMSX.uf2` onto the Pico in BOOTSEL mode, or flash
 
 | Option | Default | |
 |--------|---------|---|
-| `BAREMSX_HDMI` | ON | HDMI/DVI over HSTX (OFF = PicoCalc ILI9488 LCD backend) |
 | `BAREMSX_USB_KEYBOARD` | ON | USB keyboard via TinyUSB host |
 | `BAREMSX_SD` | ON | SD card + boot menu (FatFs) |
 | `BAREMSX_BAKED_ROMS` | auto | Bake a fallback BIOS+game into the binary (only if you generated the headers yourself with `tools/rom_to_header.py`; OFF keeps the binary free of copyrighted material) |

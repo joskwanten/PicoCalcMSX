@@ -16,7 +16,7 @@
 #include "emu2149.h"
 #include "pico.h"
 
-// PicoCalc-port van machine.c (milestone 1: boot naar BASIC).
+// Platform-agnostische machine: BIOS/cartridge komen via machine_init binnen.
 // Verschillen met de SDL-versie:
 //  - BIOS komt uit flash (bios_rom[] in bios_rom.h) i.p.v. van disk
 //  - geen cartridge/SCC en geen audio (komt later)

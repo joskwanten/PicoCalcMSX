@@ -39,7 +39,7 @@ int usbkbd_menu_poll(void)
     return ev;
 }
 
-// --- MSX key-matrix indices (row*8 + col), same as keymap.c ---
+// --- MSX key-matrix indices (row*8 + col) ---
 #define MSX_SHIFT 48
 #define MSX_CTRL  49
 #define MSX_GRAPH 50

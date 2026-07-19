@@ -292,7 +292,7 @@ void renderSprites(tms9918_context_t *context, uint32_t *image) {
     }
 }
 
-// ---- Per-scanline renderers (voor de PicoCalc: geen volledige framebuffer) ----
+// ---- Per-scanline renderers (embedded: geen volledige framebuffer nodig) ----
 // Zelfde logica als de whole-image versies, maar voor één displayregel ln
 // (0..191) in een lijnbuffer van 256 pixels.
 

@@ -35,23 +35,11 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-# Beelduitvoer: HDMI/DVI via RP2350 HSTX (pico_hdmi), of de PicoCalc ILI9488-LCD.
-option(BAREMSX_HDMI "Output over HDMI/DVI (RP2350 HSTX) instead of the SPI LCD" ON)
-
-# De PicoCalc-keyboard (STM32 op I2C1) bestaat alleen mét het PicoCalc-moederbord.
-# Een standalone HDMI-bord heeft (nog) geen keyboard — USB-HID is toekomstig werk.
-# Zonder PicoCalc hangt de I2C-init, dus in de HDMI-build standaard uit.
-if(BAREMSX_HDMI)
-    set(_kbd_default OFF)
-else()
-    set(_kbd_default ON)
-endif()
-option(PICOCALC_I2C_KEYBOARD "Use the PicoCalc STM32 I2C keyboard" ${_kbd_default})
-
 add_executable(BareMSX
         main_pico.c
-        i2ckbd.c
-        keymap.c
+        # Beelduitvoer: HDMI/DVI via RP2350 HSTX (pico_hdmi) + audio data islands
+        video_hstx.c
+        audio_hdmi.c
         # MSX emulator core (ported from sdl-msx)
         emu/machine.c
         zeta/Z80.c
@@ -108,11 +96,7 @@ if(BAREMSX_BAKED_ROMS)
     target_compile_definitions(BareMSX PRIVATE BAREMSX_BAKED_ROMS=1)
 endif()
 
-if(PICOCALC_I2C_KEYBOARD)
-    target_compile_definitions(BareMSX PRIVATE PICOCALC_I2C_KEYBOARD=1)
-endif()
-
-# USB-keyboard via TinyUSB-host op de native USB-poort (standalone HDMI-bord).
+# USB-keyboard via TinyUSB-host op de native USB-poort.
 option(BAREMSX_USB_KEYBOARD "Read a USB keyboard via TinyUSB host" ON)
 if(BAREMSX_USB_KEYBOARD)
     target_sources(BareMSX PRIVATE usbkbd.c)
@@ -138,31 +122,11 @@ if(BAREMSX_SD)
     target_compile_definitions(BareMSX PRIVATE BAREMSX_SD=1)
 endif()
 
-# Backend-specifieke sources + libraries
-if(BAREMSX_HDMI)
-    target_sources(BareMSX PRIVATE
-            video_hstx.c
-            audio_hdmi.c
-    )
-    # 252 MHz sysclk + HSTX-deler 2 -> zelfde 25.2 MHz pixelklok, 2x CPU-headroom.
-    set(PICO_HDMI_HSTX_CLK_DIV 2 CACHE STRING "HSTX clk div (252MHz/2 -> 25.2MHz pixel)" FORCE)
-    add_subdirectory(third_party/pico_hdmi)
-    target_link_libraries(BareMSX pico_hdmi)
-    target_compile_definitions(BareMSX PRIVATE BAREMSX_HDMI=1)
-else()
-    target_sources(BareMSX PRIVATE
-            lcd.c
-            audio.c
-    )
-    target_link_libraries(BareMSX hardware_spi hardware_pwm)
-endif()
-
-# Gemeenschappelijke libraries
-target_link_libraries(BareMSX
-        hardware_i2c
-        hardware_dma
-        pico_cyw43_arch_none
-        )
+# HDMI/DVI over HSTX (pico_hdmi):
+# 252 MHz sysclk + HSTX-deler 2 -> zelfde 25.2 MHz pixelklok, 2x CPU-headroom.
+set(PICO_HDMI_HSTX_CLK_DIV 2 CACHE STRING "HSTX clk div (252MHz/2 -> 25.2MHz pixel)" FORCE)
+add_subdirectory(third_party/pico_hdmi)
+target_link_libraries(BareMSX pico_hdmi)
 
 pico_add_extra_outputs(BareMSX)
 
