@@ -22,3 +22,4 @@ emu/kvall2m1.h
 # macOS
 .DS_Store
 emu/nemesis2.h
+emu/f1spirit.h

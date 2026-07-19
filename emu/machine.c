@@ -14,8 +14,9 @@
 #include "konami-mega-rom-scc.h"
 #include "emu2149.h"
 #include "bios_rom.h"
-// #include "nemesis2.h"
-#include "salamander.h"
+// #include "f1spirit.h"
+#include "nemesis2.h"
+// #include "salamander.h"
 // #include "kvall2m1.h"
 #include "pico.h"
 

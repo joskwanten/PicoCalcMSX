@@ -139,9 +139,10 @@ static void renderScreen0(tms9918_context_t *context, uint32_t *image)
             uint32_t index = (y * 40) + x;
             // Get Pattern name
             uint32_t c = context->vram[PN + index];
-            // Get Colors from the Color table
-            uint32_t fg = GET_TEXT_COLOR(context);
-            uint32_t bg = GET_BACKDROP_COLOR(context);
+            // Get Colors from the Color table (kleur 0 = transparent -> backdrop)
+            uint32_t bg = palette[GET_BACKDROP_COLOR(context)];
+            uint32_t t = GET_TEXT_COLOR(context);
+            uint32_t fg = t ? palette[t] : bg;
             for (uint32_t i = 0; i < 8; i++)
             {
                 uint32_t p = context->vram[PG + (8 * c) + i];
@@ -149,11 +150,11 @@ static void renderScreen0(tms9918_context_t *context, uint32_t *image)
                 {
                     if (p & (1 << (7 - j)))
                     {
-                        image[(256 * ((y * 8) + i) + ((x * 6) + j))] = palette[fg];
+                        image[(256 * ((y * 8) + i) + ((x * 6) + j))] = fg;
                     }
                     else
                     {
-                        image[(256 * ((y * 8) + i) + ((x * 6) + j))] = palette[bg];
+                        image[(256 * ((y * 8) + i) + ((x * 6) + j))] = bg;
                     }
                 }
             }
@@ -165,6 +166,7 @@ static void renderScreen1(tms9918_context_t *context, uint32_t *image) {
     uint32_t PG = GET_PATTERN_GEN_TABLE(context);
     uint32_t PN = GET_PATTERN_NAME_TABLE(context);
     uint32_t CT = GET_COLOR_TABLE(context);
+    uint32_t bdc = palette[GET_BACKDROP_COLOR(context)]; // kleur 0 = transparent -> backdrop
     for (uint32_t y = 0; y < 24; y++) {
         for (uint32_t x = 0; x < 32; x++) {
             uint32_t index = (y * 32) + x;
@@ -172,15 +174,15 @@ static void renderScreen1(tms9918_context_t *context, uint32_t *image) {
             uint32_t c = context->vram[PN + index];
             // Get Colors from the Color table
             uint32_t color = context->vram[CT + (c >> 3)];
-            uint32_t fg = color >> 4;
-            uint32_t bg = color & 0xf;
+            uint32_t fg = (color >> 4)  ? palette[color >> 4]  : bdc;
+            uint32_t bg = (color & 0xf) ? palette[color & 0xf] : bdc;
             for (uint32_t i = 0; i < 8; i++) {
                 uint32_t p = context->vram[PG + (8 * c) + i];
                 for (uint32_t j = 0; j < 8; j++) {
                     if (p & (1 << (7 - j))) {
-                        image[(256 * ((y * 8) + i) + ((x * 8) + j))] = palette[fg];
+                        image[(256 * ((y * 8) + i) + ((x * 8) + j))] = fg;
                     } else {
-                        image[(256 * ((y * 8) + i) + ((x * 8) + j))] = palette[bg];
+                        image[(256 * ((y * 8) + i) + ((x * 8) + j))] = bg;
                     }
                 }
             }
@@ -189,34 +191,31 @@ static void renderScreen1(tms9918_context_t *context, uint32_t *image) {
 }
 
 void renderScreen2(tms9918_context_t *context, uint32_t *image) {
+    // Zie render_line_screen2: colourMask uit R3, patternMask uit R4, kleur 0
+    // (transparent) toont de backdrop. Gelijk aan TsMSX renderScreen2.
     uint32_t PG = GET_PATTERN_GEN_TABLE(context);
     uint32_t PN = GET_PATTERN_NAME_TABLE(context);
     uint32_t CT = GET_COLOR_TABLE(context);
-    uint32_t mask = (context->registers[4] & 3) << 8;
-    for (uint32_t y = 0; y < 24; y++) {
+    uint32_t colourMask  = ((context->registers[3] & 0x7f) << 3) | 7;
+    uint32_t patternMask = ((context->registers[4] & 3)   << 8) | 0xff;
+    uint32_t bdc = palette[GET_BACKDROP_COLOR(context)];
+    for (uint32_t y = 0; y < 192; y++) {
+        uint32_t third = y >> 6, row = y & 7;
         for (uint32_t x = 0; x < 32; x++) {
-            uint32_t index = (y * 32) + x;
-            uint32_t table = (index & mask) >> 8;
-            // Get Pattern name
-            uint32_t cc = context->vram[PN + index];
-            uint32_t offset = (table * 256 * 8) + (8 * cc);
-            for (uint32_t i = 0; i < 8; i++) {
-                uint32_t p = context->vram[PG + offset + i];
-                uint32_t c = context->vram[CT + offset + i];
-                uint32_t fg = c >> 4;
-                uint32_t bg = c & 0xf;
-                uint32_t imgIndex = 256 * ((y * 8) + i) + ((x * 8));
-                uint32_t fg_color =  palette[fg];
-                uint32_t bg_color =  bg ? palette[bg] : palette[GET_BACKDROP_COLOR(context)];
-                image[imgIndex + 0] = p & 0x80 ? fg_color : bg_color;
-                image[imgIndex + 1] = p & 0x40 ? fg_color : bg_color;
-                image[imgIndex + 2] = p & 0x20 ? fg_color : bg_color;
-                image[imgIndex + 3] = p & 0x10 ? fg_color : bg_color;
-                image[imgIndex + 4] = p & 0x08 ? fg_color : bg_color;
-                image[imgIndex + 5] = p & 0x04 ? fg_color : bg_color;
-                image[imgIndex + 6] = p & 0x02 ? fg_color : bg_color;
-                image[imgIndex + 7] = p & 0x01 ? fg_color : bg_color;
-            }
+            uint32_t charcode = context->vram[PN + ((y >> 3) * 32) + x] + (third << 8);
+            uint32_t p   = context->vram[PG + ((charcode & patternMask) << 3) + row];
+            uint32_t col = context->vram[CT + ((charcode & colourMask) << 3) + row];
+            uint32_t fg = (col >> 4)  ? palette[col >> 4]  : bdc;
+            uint32_t bg = (col & 0xf) ? palette[col & 0xf] : bdc;
+            uint32_t imgIndex = (256 * y) + (x * 8);
+            image[imgIndex + 0] = p & 0x80 ? fg : bg;
+            image[imgIndex + 1] = p & 0x40 ? fg : bg;
+            image[imgIndex + 2] = p & 0x20 ? fg : bg;
+            image[imgIndex + 3] = p & 0x10 ? fg : bg;
+            image[imgIndex + 4] = p & 0x08 ? fg : bg;
+            image[imgIndex + 5] = p & 0x04 ? fg : bg;
+            image[imgIndex + 6] = p & 0x02 ? fg : bg;
+            image[imgIndex + 7] = p & 0x01 ? fg : bg;
         }
     }
 }
@@ -302,13 +301,14 @@ static void __not_in_flash_func(render_line_screen0)(tms9918_context_t *context,
     uint32_t PG = GET_PATTERN_GEN_TABLE(context);
     uint32_t PN = GET_PATTERN_NAME_TABLE(context);
     int y = ln >> 3, i = ln & 7;
-    uint32_t fg = GET_TEXT_COLOR(context);
-    uint32_t bg = GET_BACKDROP_COLOR(context);
+    uint32_t bgc = palette[GET_BACKDROP_COLOR(context)];
+    uint32_t t = GET_TEXT_COLOR(context);
+    uint32_t fgc = t ? palette[t] : bgc; // kleur 0 = transparent -> backdrop
     for (int x = 0; x < 40; x++) {
         uint32_t c = context->vram[PN + (y * 40) + x];
         uint32_t p = context->vram[PG + (8 * c) + i];
         for (int j = 0; j < 6; j++)
-            line[(x * 6) + j] = (p & (1 << (7 - j))) ? palette[fg] : palette[bg];
+            line[(x * 6) + j] = (p & (1 << (7 - j))) ? fgc : bgc;
     }
 }
 
@@ -317,36 +317,41 @@ static void __not_in_flash_func(render_line_screen1)(tms9918_context_t *context,
     uint32_t PG = GET_PATTERN_GEN_TABLE(context);
     uint32_t PN = GET_PATTERN_NAME_TABLE(context);
     uint32_t CT = GET_COLOR_TABLE(context);
+    uint32_t bdc = palette[GET_BACKDROP_COLOR(context)]; // kleur 0 = transparent -> backdrop
     int y = ln >> 3, i = ln & 7;
     for (int x = 0; x < 32; x++) {
         uint32_t c = context->vram[PN + (y * 32) + x];
         uint32_t color = context->vram[CT + (c >> 3)];
-        uint32_t fg = color >> 4, bg = color & 0xf;
+        uint32_t fg = (color >> 4)  ? palette[color >> 4]  : bdc;
+        uint32_t bg = (color & 0xf) ? palette[color & 0xf] : bdc;
         uint32_t p = context->vram[PG + (8 * c) + i];
         for (int j = 0; j < 8; j++)
-            line[(x * 8) + j] = (p & (1 << (7 - j))) ? palette[fg] : palette[bg];
+            line[(x * 8) + j] = (p & (1 << (7 - j))) ? fg : bg;
     }
 }
 
 static void __not_in_flash_func(render_line_screen2)(tms9918_context_t *context, uint32_t *line, int ln)
 {
+    // Trouwe port van TsMSX renderScreen2: het kleur-tabel-adres wordt via een
+    // eigen mask uit register 3 (colourMask) bepaald, het pattern-adres via
+    // register 4 (patternMask). Kleur 0 is op de TMS9918 "transparent" en toont
+    // de backdrop; TsMSX doet dat via alpha 0 + canvas-achtergrondkleur, hier
+    // substitueren we expliciet (voor fg én bg).
     uint32_t PG = GET_PATTERN_GEN_TABLE(context);
     uint32_t PN = GET_PATTERN_NAME_TABLE(context);
     uint32_t CT = GET_COLOR_TABLE(context);
-    uint32_t mask = (context->registers[4] & 3) << 8;
-    int y = ln >> 3, i = ln & 7;
+    uint32_t colourMask  = ((context->registers[3] & 0x7f) << 3) | 7;
+    uint32_t patternMask = ((context->registers[4] & 3)   << 8) | 0xff;
+    uint32_t bdc = palette[GET_BACKDROP_COLOR(context)];
+    int third = ln >> 6, row = ln & 7, y = ln >> 3;
     for (int x = 0; x < 32; x++) {
-        uint32_t index = (y * 32) + x;
-        uint32_t table = (index & mask) >> 8;
-        uint32_t cc = context->vram[PN + index];
-        uint32_t offset = (table * 256 * 8) + (8 * cc);
-        uint32_t p = context->vram[PG + offset + i];
-        uint32_t col = context->vram[CT + offset + i];
-        uint32_t fg = col >> 4, bg = col & 0xf;
-        uint32_t fgc = palette[fg];
-        uint32_t bgc = bg ? palette[bg] : palette[GET_BACKDROP_COLOR(context)];
+        uint32_t charcode = context->vram[PN + (y * 32) + x] + (third << 8);
+        uint32_t p   = context->vram[PG + ((charcode & patternMask) << 3) + row];
+        uint32_t col = context->vram[CT + ((charcode & colourMask) << 3) + row];
+        uint32_t fg = (col >> 4)  ? palette[col >> 4]  : bdc;
+        uint32_t bg = (col & 0xf) ? palette[col & 0xf] : bdc;
         for (int j = 0; j < 8; j++)
-            line[(x * 8) + j] = (p & (1 << (7 - j))) ? fgc : bgc;
+            line[(x * 8) + j] = (p & (1 << (7 - j))) ? fg : bg;
     }
 }
 
