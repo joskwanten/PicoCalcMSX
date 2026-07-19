@@ -55,6 +55,19 @@ long storage_read(const char *dir, const char *name, uint8_t *buf, size_t max)
     return (fr == FR_OK) ? (long)br : -1;
 }
 
+long storage_read_at(const char *dir, const char *name, uint32_t off, uint8_t *buf, size_t len)
+{
+    char path[300];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return -1;
+    if (f_lseek(&f, off) != FR_OK) { f_close(&f); return -1; }
+    UINT br = 0;
+    FRESULT fr = f_read(&f, buf, (UINT)len, &br);
+    f_close(&f);
+    return (fr == FR_OK) ? (long)br : -1;
+}
+
 uint8_t *storage_load(const char *dir, const char *name, uint32_t *size)
 {
     long sz = storage_size(dir, name);

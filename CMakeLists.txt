@@ -90,6 +90,10 @@ target_include_directories(PicoCalcMSX PRIVATE
 # Zeta Z80 core wordt statisch mee-gecompileerd
 target_compile_definitions(PicoCalcMSX PRIVATE Z80_STATIC)
 
+# Een gefaalde malloc moet NULL teruggeven (het ROM-laadpad handelt dat af),
+# niet panicken (SDK-default) — dat gaf een stille lockup bij grote ROMs.
+target_compile_definitions(PicoCalcMSX PRIVATE PICO_MALLOC_PANIC=0)
+
 if(PICOCALC_I2C_KEYBOARD)
     target_compile_definitions(PicoCalcMSX PRIVATE PICOCALC_I2C_KEYBOARD=1)
 endif()
@@ -110,12 +114,13 @@ if(PICOCALC_SD)
             storage_pico.c
             sd_spi.c
             diskio.c
+            flash_stage.c
             third_party/fatfs/ff.c
             third_party/fatfs/ffunicode.c
             third_party/fatfs/ffsystem.c
     )
     target_include_directories(PicoCalcMSX PRIVATE ${CMAKE_CURRENT_LIST_DIR}/third_party/fatfs)
-    target_link_libraries(PicoCalcMSX hardware_spi)
+    target_link_libraries(PicoCalcMSX hardware_spi hardware_flash hardware_watchdog)
     target_compile_definitions(PicoCalcMSX PRIVATE PICOCALC_SD=1)
 endif()
 

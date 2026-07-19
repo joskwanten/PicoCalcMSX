@@ -41,6 +41,10 @@ long storage_size(const char *dir, const char *name);
 // Read dir/name fully into `buf` (up to `max` bytes). Returns bytes read, or -1.
 long storage_read(const char *dir, const char *name, uint8_t *buf, size_t max);
 
+// Read `len` bytes at byte-offset `off` from dir/name. Returns bytes read
+// (short at EOF), or -1. Used for chunked reads (e.g. staging ROMs to flash).
+long storage_read_at(const char *dir, const char *name, uint32_t off, uint8_t *buf, size_t len);
+
 // Allocate a buffer of the file's size, read the whole file into it, and return
 // it (caller frees). *size receives the byte count. Returns NULL on error.
 uint8_t *storage_load(const char *dir, const char *name, uint32_t *size);

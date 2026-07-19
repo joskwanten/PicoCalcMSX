@@ -14,7 +14,14 @@
 #ifdef PICOCALC_SD
 #include "storage.h"
 #include "menu.h"
+#include "flash_stage.h"
+#include "hardware/watchdog.h"
 #include <string.h>
+
+// Menu-keuze die een flash-staging vereist, doorgegeven over een zachte reboot
+// heen (flashen kan alleen vóórdat de HSTX-video draait). scratch[0] = magic,
+// scratch[1] = index in de roms/-listing. (scratch[4..7] gebruikt de SDK zelf.)
+#define BOOT_STAGE_MAGIC 0x53544147u // "STAG"
 #endif
 
 // PicoCalc MSX host.
@@ -232,10 +239,6 @@ int main(void)
     usbkbd_init(); // TinyUSB host op de native USB-poort
 #endif
 
-#ifdef PICOCALC_HDMI
-    video_hstx_init();   // HDMI-output + core 1 starten (het menu rendert hierin)
-#endif
-
     // BIOS + game bepalen: van SD (met boot-menu) of ingebakken als fallback.
     const uint8_t *use_bios = bios_rom;
     uint32_t use_bios_size = BIOS_ROM_SIZE;
@@ -245,9 +248,30 @@ int main(void)
 #if defined(PICOCALC_HDMI) && defined(PICOCALC_SD)
     static uint8_t sd_bios[65536];
     static menu_config_t cfg;
-    if (storage_init()) {
+    static storage_entry_t ent[64];
+    bool sd_ok = storage_init();
+    const uint8_t *staged_game = NULL;
+    uint32_t staged_size = 0;
+
+    // Reboot-staging: als het menu vóór de reboot een (grote) ROM koos, flash
+    // die dan NU — de HSTX-video draait nog niet, dus dit is het enige veilige
+    // moment voor flash_range_erase/program.
+    if (sd_ok && watchdog_hw->scratch[0] == BOOT_STAGE_MAGIC) {
+        uint32_t idx = watchdog_hw->scratch[1];
+        watchdog_hw->scratch[0] = 0;
+        int nr = storage_list(SD_ROMS, ent, 64);
+        if ((int)idx < nr && !ent[idx].is_dir)
+            staged_game = flash_stage_rom(SD_ROMS, ent[idx].name, &staged_size);
+    }
+#endif
+
+#ifdef PICOCALC_HDMI
+    video_hstx_init();   // HDMI-output + core 1 starten (het menu rendert hierin)
+#endif
+
+#if defined(PICOCALC_HDMI) && defined(PICOCALC_SD)
+    if (sd_ok) {
         // BIOS uit system/ (eerste bestand), gepad naar 64KB.
-        storage_entry_t ent[64];
         char bios_name[STORAGE_MAX_NAME] = "";
         int ns = storage_list(SD_SYSTEM, ent, 64);
         for (int i = 0; i < ns; i++)
@@ -255,24 +279,55 @@ int main(void)
         if (bios_name[0]) {
             memset(sd_bios, 0xFF, sizeof sd_bios);
             storage_read(SD_SYSTEM, bios_name, sd_bios, sizeof sd_bios);
-
-            // Boot-menu (USB-keyboard bestuurt 'm; rendert in de HDMI-backbuffer).
-            memset(&cfg, 0, sizeof cfg);
-            menu_init(sd_bios, &cfg);
-            usbkbd_menu_mode(true);
-            while (!menu_start_requested()) {
-                usbkbd_task();
-                int ev;
-                while ((ev = usbkbd_menu_poll()) >= 0) menu_input((menu_input_t)ev);
-                uint16_t *bb = video_hstx_backbuffer();
-                if (bb) { menu_render(bb); video_hstx_present(0x52BD); } // 0x52BD = MSX-blauw (565)
-            }
-            usbkbd_menu_mode(false);
-
             use_bios = sd_bios;
             use_bios_size = sizeof sd_bios;
-            use_game = cfg.slot1[0] ? storage_load(SD_ROMS, cfg.slot1, &use_game_size) : 0;
-            if (!cfg.slot1[0]) use_game_size = 0;
+
+            if (staged_game) {
+                // Zojuist gestaged (na de menu-reboot): direct booten, geen menu.
+                use_game = staged_game;
+                use_game_size = staged_size;
+            } else {
+                // Boot-menu (USB-keyboard bestuurt 'm; rendert in de HDMI-backbuffer).
+                memset(&cfg, 0, sizeof cfg);
+                menu_init(sd_bios, &cfg);
+                usbkbd_menu_mode(true);
+                while (!menu_start_requested()) {
+                    usbkbd_task();
+                    int ev;
+                    while ((ev = usbkbd_menu_poll()) >= 0) menu_input((menu_input_t)ev);
+                    uint16_t *bb = video_hstx_backbuffer();
+                    if (bb) { menu_render(bb); video_hstx_present(0x52BD); } // 0x52BD = MSX-blauw (565)
+                }
+                usbkbd_menu_mode(false);
+
+                use_game = NULL;
+                use_game_size = 0;
+                if (cfg.slot1[0]) {
+                    // 1. Kleine ROM: in RAM laden (snel, geen flash-slijtage).
+                    //    NB: eerst de grootte checken — een te grote malloc
+                    //    PANICt op de Pico (PICO_MALLOC_PANIC) i.p.v. NULL.
+                    long sz = storage_size(SD_ROMS, cfg.slot1);
+                    if (sz > 0 && sz <= 48 * 1024)
+                        use_game = storage_load(SD_ROMS, cfg.slot1, &use_game_size);
+                    // 2. Groot: staat 'ie al in de flash-stage van een vorige keer?
+                    if (!use_game)
+                        use_game = flash_stage_get(cfg.slot1, &use_game_size);
+                    // 3. Te groot voor RAM en nog niet gestaged: keuze in de
+                    //    watchdog-scratch en zachte reboot; de staging draait
+                    //    dan vóór de video-init (zie boven).
+                    if (!use_game) {
+                        int nr = storage_list(SD_ROMS, ent, 64);
+                        for (int i = 0; i < nr; i++) {
+                            if (!ent[i].is_dir && strcmp(ent[i].name, cfg.slot1) == 0) {
+                                watchdog_hw->scratch[0] = BOOT_STAGE_MAGIC;
+                                watchdog_hw->scratch[1] = (uint32_t)i;
+                                watchdog_reboot(0, 0, 0);
+                                while (true) tight_loop_contents();
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 #endif
