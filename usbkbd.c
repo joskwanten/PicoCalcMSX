@@ -1,7 +1,43 @@
 #include "usbkbd.h"
 #include "machine.h" // machine_keydown / machine_keyup
+#include "menu.h"     // menu_input_t
 
 #include "tusb.h"
+
+// --- menu-mode navigation event queue ---
+static volatile bool g_menu_mode = false;
+#define MENU_Q 8
+static volatile int g_mq[MENU_Q];
+static volatile int g_mq_head = 0, g_mq_tail = 0;
+
+static void menu_push(int ev)
+{
+    int nh = (g_mq_head + 1) % MENU_Q;
+    if (nh != g_mq_tail) { g_mq[g_mq_head] = ev; g_mq_head = nh; }
+}
+
+static void menu_key(uint8_t hid)
+{
+    int ev = -1;
+    switch (hid) {
+    case 0x52: ev = MENU_UP; break;                 // Up
+    case 0x51: ev = MENU_DOWN; break;               // Down
+    case 0x28: case 0x58: case 0x2C: ev = MENU_ENTER; break; // Enter, KP-Enter, Space
+    case 0x29: case 0x2A: ev = MENU_BACK; break;    // Esc, Backspace
+    default: break;
+    }
+    if (ev >= 0) menu_push(ev);
+}
+
+void usbkbd_menu_mode(bool on) { g_menu_mode = on; }
+
+int usbkbd_menu_poll(void)
+{
+    if (g_mq_tail == g_mq_head) return -1;
+    int ev = g_mq[g_mq_tail];
+    g_mq_tail = (g_mq_tail + 1) % MENU_Q;
+    return ev;
+}
 
 // --- MSX key-matrix indices (row*8 + col), same as keymap.c ---
 #define MSX_SHIFT 48
@@ -78,6 +114,17 @@ static void process_report(const hid_keyboard_report_t *r)
 {
     static uint8_t prev_kc[6];
     static uint8_t prev_mod;
+
+    if (g_menu_mode) {
+        // Only newly-pressed keys generate menu events.
+        for (int i = 0; i < 6; i++) {
+            uint8_t k = r->keycode[i];
+            if (k && !contains(prev_kc, k)) menu_key(k);
+        }
+        for (int i = 0; i < 6; i++) prev_kc[i] = r->keycode[i];
+        prev_mod = r->modifier;
+        return;
+    }
 
     // Modifiers (either left or right) -> MSX Shift / Ctrl / Graph.
     diff_mod(prev_mod, r->modifier,

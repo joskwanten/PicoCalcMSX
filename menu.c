@@ -34,38 +34,46 @@ static char *g_target;              // config field to write
 static storage_entry_t g_list[256];
 static int g_list_n, g_bsel, g_btop;
 
-// --- rendering ---
-static void draw_char(uint32_t *fb, int cx, int cy, char c, uint32_t fg, uint32_t bg)
+// --- rendering (RGB565 output; colours defined as ARGB, converted here) ---
+static inline uint16_t to565(uint32_t argb)
+{
+    return (uint16_t)(((argb >> 8) & 0xF800) | ((argb >> 5) & 0x07E0) | ((argb >> 3) & 0x001F));
+}
+
+static void draw_char(uint16_t *fb, int cx, int cy, char c, uint32_t fg, uint32_t bg)
 {
     if (cx < 0 || cy < 0 || cx >= COLS || cy >= ROWS) return;
+    uint16_t f = to565(fg), b = to565(bg);
     const uint8_t *g = &g_font[(uint8_t)c * 8];
     for (int y = 0; y < 8; y++) {
         uint8_t bits = g[y];
-        uint32_t *dst = &fb[(cy * 8 + y) * SCR_W + cx * 8];
+        uint16_t *dst = &fb[(cy * 8 + y) * SCR_W + cx * 8];
         for (int x = 0; x < 8; x++)
-            dst[x] = (bits & (0x80 >> x)) ? fg : bg;
+            dst[x] = (bits & (0x80 >> x)) ? f : b;
     }
 }
 
-static void draw_text(uint32_t *fb, int cx, int cy, const char *s, uint32_t fg, uint32_t bg)
+static void draw_text(uint16_t *fb, int cx, int cy, const char *s, uint32_t fg, uint32_t bg)
 {
     while (*s && cx < COLS)
         draw_char(fb, cx++, cy, *s++, fg, bg);
 }
 
-static void fill_screen(uint32_t *fb, uint32_t c)
+static void fill_screen(uint16_t *fb, uint32_t c)
 {
-    for (int i = 0; i < SCR_W * SCR_H; i++) fb[i] = c;
+    uint16_t v = to565(c);
+    for (int i = 0; i < SCR_W * SCR_H; i++) fb[i] = v;
 }
 
-static void fill_row(uint32_t *fb, int cy, uint32_t c)
+static void fill_row(uint16_t *fb, int cy, uint32_t c)
 {
+    uint16_t v = to565(c);
     for (int y = 0; y < 8; y++)
         for (int x = 0; x < SCR_W; x++)
-            fb[(cy * 8 + y) * SCR_W + x] = c;
+            fb[(cy * 8 + y) * SCR_W + x] = v;
 }
 
-static void render_main(uint32_t *fb)
+static void render_main(uint16_t *fb)
 {
     fill_screen(fb, COL_BG);
     draw_text(fb, 10, 1, "PicoCalcMSX", COL_TITLE, COL_BG);
@@ -95,7 +103,7 @@ static void render_main(uint32_t *fb)
     draw_text(fb, 2, 22, "up/dn  enter=pick  esc=clear", COL_DIM, COL_BG);
 }
 
-static void render_browse(uint32_t *fb)
+static void render_browse(uint16_t *fb)
 {
     fill_screen(fb, COL_BG);
     char title[40];
@@ -120,7 +128,7 @@ static void render_browse(uint32_t *fb)
     draw_text(fb, 2, 22, "enter=select  esc=cancel", COL_DIM, COL_BG);
 }
 
-void menu_render(uint32_t *fb)
+void menu_render(uint16_t *fb)
 {
     if (g_mode == MODE_MAIN) render_main(fb);
     else render_browse(fb);

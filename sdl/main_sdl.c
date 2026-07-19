@@ -56,6 +56,16 @@ static void build_map(void)
     sc_to_msx[SDL_SCANCODE_RALT] = 50 + 1;
 }
 
+// RGB565 -> ARGB8888 (the menu renders 565; the SDL texture is ARGB).
+static inline uint32_t c565_to_argb(uint16_t c)
+{
+    uint32_t r = (c >> 11) & 0x1F, g = (c >> 5) & 0x3F, b = c & 0x1F;
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    return 0xff000000u | (r << 16) | (g << 8) | b;
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -89,8 +99,9 @@ int main(int argc, char **argv)
     if (!storage_init())
         return 1;
 
-    // Framebuffer + audio buffers (fb is also used to render the menu).
-    static uint32_t fb[MSX_W * MSX_H];
+    // Framebuffer + audio buffers.
+    static uint32_t fb[MSX_W * MSX_H];    // ARGB, for the SDL texture
+    static uint16_t menu565[MSX_W * MSX_H]; // RGB565, menu render target
     static uint32_t line[MSX_W];
     static int16_t audio[AUDIO_SAMPLES_PER_FRAME * 2];
 
@@ -133,7 +144,8 @@ int main(int argc, char **argv)
                 }
             }
         }
-        menu_render(fb);
+        menu_render(menu565);
+        for (int i = 0; i < MSX_W * MSX_H; i++) fb[i] = c565_to_argb(menu565[i]);
         SDL_UpdateTexture(tex, NULL, fb, MSX_W * (int)sizeof(uint32_t));
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);

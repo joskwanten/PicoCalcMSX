@@ -11,6 +11,11 @@
 #ifdef PICOCALC_USB_KEYBOARD
 #include "usbkbd.h"
 #endif
+#ifdef PICOCALC_SD
+#include "storage.h"
+#include "menu.h"
+#include <string.h>
+#endif
 
 // PicoCalc MSX host.
 //   Core 0: emulatie (Z80/VDP/keyboard), gepaced op 60 Hz.
@@ -227,16 +232,59 @@ int main(void)
     usbkbd_init(); // TinyUSB host op de native USB-poort
 #endif
 
-    if (!machine_init(bios_rom, BIOS_ROM_SIZE, game_rom, GAME_ROM_SIZE)) {
+#ifdef PICOCALC_HDMI
+    video_hstx_init();   // HDMI-output + core 1 starten (het menu rendert hierin)
+#endif
+
+    // BIOS + game bepalen: van SD (met boot-menu) of ingebakken als fallback.
+    const uint8_t *use_bios = bios_rom;
+    uint32_t use_bios_size = BIOS_ROM_SIZE;
+    const uint8_t *use_game = game_rom;
+    uint32_t use_game_size = GAME_ROM_SIZE;
+
+#if defined(PICOCALC_HDMI) && defined(PICOCALC_SD)
+    static uint8_t sd_bios[65536];
+    static menu_config_t cfg;
+    if (storage_init()) {
+        // BIOS uit system/ (eerste bestand), gepad naar 64KB.
+        storage_entry_t ent[64];
+        char bios_name[STORAGE_MAX_NAME] = "";
+        int ns = storage_list(SD_SYSTEM, ent, 64);
+        for (int i = 0; i < ns; i++)
+            if (!ent[i].is_dir) { snprintf(bios_name, sizeof bios_name, "%s", ent[i].name); break; }
+        if (bios_name[0]) {
+            memset(sd_bios, 0xFF, sizeof sd_bios);
+            storage_read(SD_SYSTEM, bios_name, sd_bios, sizeof sd_bios);
+
+            // Boot-menu (USB-keyboard bestuurt 'm; rendert in de HDMI-backbuffer).
+            memset(&cfg, 0, sizeof cfg);
+            menu_init(sd_bios, &cfg);
+            usbkbd_menu_mode(true);
+            while (!menu_start_requested()) {
+                usbkbd_task();
+                int ev;
+                while ((ev = usbkbd_menu_poll()) >= 0) menu_input((menu_input_t)ev);
+                uint16_t *bb = video_hstx_backbuffer();
+                if (bb) { menu_render(bb); video_hstx_present(0x52BD); } // 0x52BD = MSX-blauw (565)
+            }
+            usbkbd_menu_mode(false);
+
+            use_bios = sd_bios;
+            use_bios_size = sizeof sd_bios;
+            use_game = cfg.slot1[0] ? storage_load(SD_ROMS, cfg.slot1, &use_game_size) : 0;
+            if (!cfg.slot1[0]) use_game_size = 0;
+        }
+    }
+#endif
+
+    if (!machine_init(use_bios, use_bios_size, use_game, use_game_size)) {
 #ifndef PICOCALC_HDMI
         lcd_fill_screen(LCD_RED);
 #endif
         while (true) tight_loop_contents();
     }
 
-#ifdef PICOCALC_HDMI
-    video_hstx_init();   // pico_hdmi + audio-island queue; start core 1
-#else
+#ifndef PICOCALC_HDMI
     audio_init();
     // Nearest-neighbor x-mapping: scherm-x -> bron-x (256 breed -> 320 breed)
     for (int sx = 0; sx < SCALE_W; sx++)

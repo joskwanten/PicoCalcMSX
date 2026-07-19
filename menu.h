@@ -3,8 +3,8 @@
 
 // Platform-agnostic boot menu: a classic MSX-styled config screen (BIOS font +
 // MSX palette) that lets you pick a ROM for slot 1 / slot 2 and a disk for
-// A: / B:. Renders into a 256x192 ARGB (0x00RRGGBB) framebuffer, so the SDL and
-// Pico frontends present it exactly like an emulator frame.
+// A: / B:. Renders into a 256x192 RGB565 framebuffer — the Pico's native format
+// (drawn straight into the HDMI back buffer); the SDL frontend converts to ARGB.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -29,7 +29,7 @@ typedef enum {
 void menu_init(const uint8_t *bios, menu_config_t *cfg);
 
 void menu_input(menu_input_t in);
-void menu_render(uint32_t *fb); // 256x192 ARGB
+void menu_render(uint16_t *fb); // 256x192 RGB565
 bool menu_start_requested(void);
 
 #endif // MENU_H

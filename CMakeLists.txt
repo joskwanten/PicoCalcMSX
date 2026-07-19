@@ -102,6 +102,23 @@ if(PICOCALC_USB_KEYBOARD)
     target_compile_definitions(PicoCalcMSX PRIVATE PICOCALC_USB_KEYBOARD=1)
 endif()
 
+# SD-card game-loading + boot-menu (FatFs op SPI0, GP2-5).
+option(PICOCALC_SD "SD-card game loading + boot menu (FatFs)" ON)
+if(PICOCALC_SD)
+    target_sources(PicoCalcMSX PRIVATE
+            menu.c
+            storage_pico.c
+            sd_spi.c
+            diskio.c
+            third_party/fatfs/ff.c
+            third_party/fatfs/ffunicode.c
+            third_party/fatfs/ffsystem.c
+    )
+    target_include_directories(PicoCalcMSX PRIVATE ${CMAKE_CURRENT_LIST_DIR}/third_party/fatfs)
+    target_link_libraries(PicoCalcMSX hardware_spi)
+    target_compile_definitions(PicoCalcMSX PRIVATE PICOCALC_SD=1)
+endif()
+
 # Backend-specifieke sources + libraries
 if(PICOCALC_HDMI)
     target_sources(PicoCalcMSX PRIVATE
