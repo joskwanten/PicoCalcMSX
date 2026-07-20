@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include "pico/stdlib.h" // trekt pico.h (__not_in_flash_func) mee
 #include "hardware/clocks.h"
+#include "hardware/vreg.h"
+#include "hardware/structs/qmi.h"
 #include "machine.h"
 #include "video_hstx.h"
 #include "audio_hdmi.h"
@@ -141,6 +143,9 @@ int main(void)
     // 252 MHz sysclk + HSTX-deler 2 -> 25.2 MHz pixelklok (640x480@60), maar de
     // CPU draait 2x zo snel als bij 126 MHz -> genoeg headroom voor emulatie +
     // rendering op 60 fps. (Vereist MODE_HSTX_CLK_DIV=2 in de pico_hdmi-build.)
+    // NB: 378 MHz (HSTX-div 3, vreg 1.30V, QMI-div 3) is geprobeerd voor 50%
+    // meer Z80-headroom maar bleek instabiel — waarschijnlijk omdat alle
+    // peripheral-klokken (SD-SPI!) meeschalen; apart experiment voor later.
     set_sys_clock_khz(252000, true);
 
     stdio_init_all();
@@ -443,14 +448,16 @@ int main(void)
         uint32_t f_start = video_hstx_frame_count();
 
         // Eén MSX-frame emuleren, beam-paced: elke lijn wordt pas gedraaid
-        // als de HSTX-scanout in de buurt komt (max ~12 lijnen vooruit — de
-        // producer rendert tot 6 vooruit en heeft geëmuleerde state nodig), zodat
+        // als de HSTX-scanout in de buurt komt (max ~24 lijnen vooruit: de
+        // stale-preventie zit tegenwoordig bij de producer zelf — die rendert
+        // alleen al-geëmuleerde lijnen — dus core 0 mag ruim vooruit en houdt
+        // zo marge voor drukke frames zoals een zware muziekdriver), zodat
         // core 1's live lijnrender altijd actuele-maar-al-geëmuleerde VDP-
         // state ziet. Vblank-lijnen (192+) hoeven niet te wachten.
         video_hstx_set_border(machine_border_565());
         for (int ln = 0; ln < 262; ln++) {
             if (ln < vis_h) {
-                while (video_hstx_scan_msx_line() < ln - 12) {
+                while (video_hstx_scan_msx_line() < ln - 24) {
                     extern volatile int dbg_pace_ln, dbg_pace_scan;
                     dbg_pace_ln = ln;
                     dbg_pace_scan = video_hstx_scan_msx_line();
@@ -466,6 +473,7 @@ int main(void)
                 }
             }
             machine_do_line(ln);
+            video_hstx_note_emu_line(ln); // producer mag t/m deze lijn renderen
             // Vangnet: in vblank af en toe bijvullen (de hoofdaanvoer zit in
             // de pacing-wachtlus hierboven, waar core 0 tóch idle is).
             if (ln >= vis_h && (ln & 15) == 15)

@@ -36,6 +36,10 @@ void video_hstx_set_border(uint16_t border565);
 // Core 0 paced hierop: emuleer lijn L pas als de scanout in de buurt komt.
 int video_hstx_scan_msx_line(void);
 
+// Core 0 meldt na elke geëmuleerde MSX-lijn zijn voortgang (0..261); de
+// lijnproducer rendert alleen uit al-geëmuleerde state (stale-lijn-preventie).
+void video_hstx_note_emu_line(int ln);
+
 // HDMI-frames tot nu toe (pico_hdmi's video_frame_count).
 uint32_t video_hstx_frame_count(void);
 
