@@ -50,6 +50,17 @@ void machine_get_rendered_line(uint32_t* line, int y);
 typedef void (*machine_line_sink_t)(int y, const uint32_t *px, int w);
 void machine_set_line_sink(machine_line_sink_t sink);
 
+// Pico-varianten van het beam-model:
+//  - machine_do_line(line): emuleer precies één beam-lijn (0..261) — 228
+//    T-states Z80 + de VDP-events van die lijn. De host paced dit op de
+//    echte HSTX-scanout.
+//  - machine_render_line_565(dst, y): render displaylijn y uit de LIVE
+//    VDP-state naar RGB565 (aangeroepen op core 1, vlak vóór de scanout).
+//    Retourneert de breedte (256 of 512).
+void machine_do_line(int line);
+int machine_render_line_565(uint16_t *dst, int y);
+uint16_t machine_border_565(void);
+
 void machine_snapshot_vdp(void);                       // core 0: kopieer VDP-state
 void machine_render_snapshot_line(uint32_t* line, int y); // core 1: render uit snapshot
 uint32_t machine_snapshot_background_color(void);

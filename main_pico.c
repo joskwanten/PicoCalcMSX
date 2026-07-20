@@ -61,26 +61,21 @@ static inline void enable_fpu(void) {
     __asm volatile("isb");
 }
 
-// ARGB (0x00RRGGBB) -> RGB565.
-static inline uint16_t argb_to_565(uint32_t px) {
-    return (uint16_t)(((px >> 8) & 0xF800) | ((px >> 5) & 0x07E0) | ((px >> 3) & 0x001F));
+// --- lijnbronnen voor de video-pipeline (core 1 trekt lijnen op aanvraag) ---
+
+// Menu: klein 565-framebuffer dat core 0 vult; de bron kopieert er lijnen uit.
+static uint16_t menu_fb[MSX_W * MSX_H];
+static void menu_line_source(uint16_t *dst, int line, int *w)
+{
+    memcpy(dst, &menu_fb[line * MSX_W], MSX_W * sizeof(uint16_t));
+    *w = MSX_W;
 }
 
-static uint32_t line_argb[MSX_W]; // één gerenderde MSX-regel (ARGB)
-
-// Render de huidige VDP-snapshot naar de RGB565 back buffer en toon 'm.
-// Niet-blokkerend: als de display de vorige frame nog niet heeft geswapt,
-// slaan we deze frame over (de emulatie loopt onafhankelijk door op 60 Hz).
-static void render_frame_hdmi(void) {
-    uint16_t *bb = video_hstx_backbuffer();
-    if (!bb) return;
-    machine_snapshot_vdp();
-    for (int y = 0; y < MSX_H; y++) {
-        machine_render_snapshot_line(line_argb, y);
-        uint16_t *dst = &bb[y * MSX_W];
-        for (int x = 0; x < MSX_W; x++) dst[x] = argb_to_565(line_argb[x]);
-    }
-    video_hstx_present(argb_to_565(machine_snapshot_background_color()));
+// Machine: render live uit de VDP-state ("race the beam" — de beam-pacing in
+// de hoofdlus houdt core 0 net vóór de scanout).
+static void machine_line_source(uint16_t *dst, int line, int *w)
+{
+    *w = machine_render_line_565(dst, line);
 }
 
 int main(void)
@@ -180,16 +175,18 @@ int main(void)
                         snprintf(cfg.slot2, sizeof cfg.slot2, "%s", ent[s2idx - 1].name);
                 }
             } else {
-                // Boot-menu (USB-keyboard bestuurt 'm; rendert in de HDMI-backbuffer).
+                // Boot-menu: rendert in menu_fb; core 1 scant het uit via
+                // de menu-lijnbron. 0x52BD = MSX-blauw (565).
                 memset(&cfg, 0, sizeof cfg);
                 menu_init(sd_bios, &cfg);
+                video_hstx_set_border(0x52BD);
+                video_hstx_set_line_source(menu_line_source, MSX_H);
                 usbkbd_menu_mode(true);
                 while (!menu_start_requested()) {
                     usbkbd_task();
                     int ev;
                     while ((ev = usbkbd_menu_poll()) >= 0) menu_input((menu_input_t)ev);
-                    uint16_t *bb = video_hstx_backbuffer();
-                    if (bb) { menu_render(bb); video_hstx_present(0x52BD); } // 0x52BD = MSX-blauw (565)
+                    menu_render(menu_fb);
                 }
                 usbkbd_menu_mode(false);
 
@@ -279,20 +276,18 @@ int main(void)
         // Geen BIOS beschikbaar: geen (leesbare) SD-kaart en geen ingebakken
         // fallback. Effen MSX-blauw scherm als "plaats een SD-kaart"-signaal.
         printf("[boot] no BIOS: insert an SD card with system/<bios>.rom\n");
-        while (true) {
-            uint16_t *bb = video_hstx_backbuffer();
-            if (bb) {
-                for (int i = 0; i < MSX_W * MSX_H; i++) bb[i] = 0x52BD;
-                video_hstx_present(0x52BD);
-            }
-            tight_loop_contents();
-        }
+        video_hstx_set_border(0x52BD);
+        video_hstx_set_line_source(NULL, MSX_H); // alleen border = effen blauw
+        while (true) tight_loop_contents();
     }
 
     if (!machine_init(use_bios, use_bios_size, use_game, use_game_size,
                       use_game2, use_game2_size)) {
         while (true) tight_loop_contents();
     }
+
+    // Machine draait: core 1 rendert vanaf nu live uit de VDP-state.
+    video_hstx_set_line_source(machine_line_source, MSX_H);
 
     uint32_t emu_frames = 0;
     uint64_t sec_t0 = time_us_64();
@@ -302,24 +297,34 @@ int main(void)
         usbkbd_task(); // USB-host pompen (HID-reports -> MSX-matrix)
 #endif
 
-        // Eén MSX-frame emuleren
-        machine_do_cycles();
-        machine_generate_interrupt();
+        // Eén MSX-frame emuleren, beam-paced: elke lijn wordt pas gedraaid
+        // als de HSTX-scanout in de buurt komt (max ~8 lijnen vooruit), zodat
+        // core 1's live lijnrender altijd actuele-maar-al-geëmuleerde VDP-
+        // state ziet. Vblank-lijnen (192+) hoeven niet te wachten.
+        video_hstx_set_border(machine_border_565());
+        for (int ln = 0; ln < 262; ln++) {
+            if (ln < MSX_H) {
+                while (video_hstx_scan_msx_line() < ln - 8) {
+#ifdef BAREMSX_USB_KEYBOARD
+                    usbkbd_task();
+#endif
+                    tight_loop_contents();
+                }
+            }
+            machine_do_line(ln);
+        }
 
         audio_hdmi_generate();   // emu-audio -> ring (core 1 pompt naar HDMI)
-        render_frame_hdmi();     // render naar back buffer + present (swap op vsync)
 
         emu_frames++;
 
-        // Pace op de HDMI-frame (zoals de bouncing_box-demo): wacht tot de HSTX-
-        // scanout een frame verder is. Geen sleep_us -> geen SDK-timer-alarm-IRQ
-        // met FP-instructies (die gaf een NOCP-HardFault), en de emulatie loopt
-        // netjes in lockstep met de 60 Hz display-uitvoer.
+        // Frame-flank afwachten (de beam-pacing hierboven eindigt vlak na de
+        // onderrand; dit lijnt het volgende frame uit).
         {
             uint32_t f = video_hstx_frame_count();
             while (video_hstx_frame_count() == f) {
 #ifdef BAREMSX_USB_KEYBOARD
-                usbkbd_task(); // USB vaak pompen tijdens de idle-wait -> snelle respons
+                usbkbd_task();
 #endif
                 tight_loop_contents();
             }

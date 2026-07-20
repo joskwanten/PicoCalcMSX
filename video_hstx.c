@@ -1,6 +1,8 @@
 #include "video_hstx.h"
 #include "audio_hdmi.h"
 
+#include <string.h>
+
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/sync.h"
@@ -8,64 +10,110 @@
 #include "pico_hdmi/video_output.h"
 #include "pico_hdmi/hstx_data_island_queue.h"
 
-// --- Output geometry: 256x192 -> 2x -> 512x384, centered in 640x480 ---
+// --- uitvoergeometrie: actief gebied is altijd 512 schermpixels breed ---
 #define OUT_W 640
 #define OUT_H 480
-#define X_OFF ((OUT_W - VHSTX_MSX_W * 2) / 2) // 64
-#define Y_OFF ((OUT_H - VHSTX_MSX_H * 2) / 2) // 48
+#define X_OFF ((OUT_W - 512) / 2)  // 64 px border links/rechts
+#define WORD_LEFT (X_OFF / 2)      // 32 woorden border
+#define WORD_ACTIVE (512 / 2)      // 256 woorden actief
 
-// Word (2-pixel) indices into the 320-word scanline buffer.
-#define WORD_LEFT  (X_OFF / 2)                    // 32  first active word
-#define WORD_RIGHT ((X_OFF + VHSTX_MSX_W * 2) / 2) // 288 first border word on the right
+// --- lijn-pipeline ---
+// Slot = lijnnummer % RING_N. Producer (core 1-idle) rendert vooruit; de
+// scanlinecallback consumeert. ring_line[i] = welk MSX-lijnnummer er in slot
+// i klaarstaat (-1 = leeg); pas gezet NA het vullen (dmb) zodat de consumer
+// nooit een half gevulde lijn ziet.
+#define RING_N 4
+static uint16_t ring[RING_N][512];
+static volatile int16_t ring_line[RING_N] = {-1, -1, -1, -1};
+static volatile uint16_t ring_w[RING_N];
 
-// Double-buffered RGB565 framebuffers. front/back are only ever swapped by the
-// vsync callback (core 1); core 0 writes fb[back] and reads/writes nothing that
-// core 1 relies on except via swap_pending / border565.
-static uint16_t fb[2][VHSTX_MSX_W * VHSTX_MSX_H];
-static volatile int fb_front = 0;
-static volatile int fb_back = 1;
-static volatile bool swap_pending = false;
+static video_line_source_t line_source = NULL;
+static volatile int src_lines = VHSTX_MSX_H; // 192 of 212
 static volatile uint16_t border565 = 0;
+static volatile uint32_t scan_active_line = 0; // laatst gescande HDMI-lijn
 
-// Fill one HDMI scanline (320 uint32_t words = 640 RGB565 pixels). Runs on
-// core 1 during h-blank, so it must stay cheap: no rendering, just copy+double.
+static inline int y_off(void) { return (OUT_H - 2 * src_lines) / 2; }
+
+// HDMI-scanline vullen (320 woorden = 640 px). Draait op core 1 in de
+// h-blank: alleen kopiëren/expanderen, nooit renderen.
 static void __not_in_flash_func(scanline_cb)(uint32_t v_scanline, uint32_t active_line, uint32_t *dst)
 {
     (void)v_scanline;
+    scan_active_line = active_line;
+
     const uint16_t b = border565;
     const uint32_t bw = (uint32_t)b | ((uint32_t)b << 16);
+    const int yo = y_off();
 
-    if (active_line < Y_OFF || active_line >= Y_OFF + VHSTX_MSX_H * 2) {
+    if ((int)active_line < yo || (int)active_line >= yo + 2 * src_lines) {
         for (int w = 0; w < OUT_W / 2; w++) dst[w] = bw;
         return;
     }
 
-    const int my = (int)(active_line - Y_OFF) >> 1; // vertical 2x
-    const uint16_t *row = &fb[fb_front][my * VHSTX_MSX_W];
+    const int my = ((int)active_line - yo) >> 1; // verticale 2x
+    const int slot = my % RING_N;
 
     int w = 0;
-    for (; w < WORD_LEFT; w++) dst[w] = bw;             // left border
-    for (; w < WORD_RIGHT; w++) {                       // active: 1 MSX px -> 1 word (2x horiz)
-        uint16_t px = row[w - WORD_LEFT];
-        dst[w] = (uint32_t)px | ((uint32_t)px << 16);
+    for (; w < WORD_LEFT; w++) dst[w] = bw;
+
+    if (ring_line[slot] == my) {
+        const uint16_t *row = ring[slot];
+        if (ring_w[slot] == 512) {
+            const uint32_t *src32 = (const uint32_t *)row; // 2 px per woord, 1:1
+            for (int i = 0; i < WORD_ACTIVE; i++) dst[w + i] = src32[i];
+        } else {
+            for (int i = 0; i < 256; i++) {                // 256 px -> 2x breed
+                uint16_t px = row[i];
+                dst[w + i] = (uint32_t)px | ((uint32_t)px << 16);
+            }
+        }
+        w += WORD_ACTIVE;
+    } else {
+        // Pipeline-miss (hoort niet te gebeuren): border i.p.v. rommel.
+        for (int i = 0; i < WORD_ACTIVE; i++) dst[w + i] = bw;
+        w += WORD_ACTIVE;
     }
-    for (; w < OUT_W / 2; w++) dst[w] = bw;             // right border
+
+    for (; w < OUT_W / 2; w++) dst[w] = bw;
 }
 
-// Swap buffers at the top of each frame if core 0 has a new one ready.
+// Producer: render de eerstvolgende lijnen (venster van 3) vooruit op de
+// scanout. Draait als core 1-achtergrondtaak, samen met de audio-pomp.
+static void __not_in_flash_func(pipeline_task)(void)
+{
+    video_line_source_t src = line_source;
+    if (src) {
+        int n = src_lines;
+        int yo = y_off();
+        int sl = (int)scan_active_line;
+        // Beam-positie in MSX-lijnen; vóór/onder het beeld -> volgende frame
+        // voorbereiden vanaf lijn 0.
+        int base = (sl < yo) ? -1
+                 : (sl >= yo + 2 * n) ? -1
+                 : ((sl - yo) >> 1);
+        for (int k = 1; k <= 3; k++) {
+            int L = (base + k) % n;
+            if (L < 0) L += n;
+            int slot = L % RING_N;
+            if (ring_line[slot] != L) {
+                int w = 256;
+                src(ring[slot], L, &w);
+                ring_w[slot] = (uint16_t)w;
+                __dmb(); // lijndata zichtbaar vóór het label
+                ring_line[slot] = (int16_t)L;
+            }
+        }
+    }
+    audio_hdmi_pump();
+}
+
+// Vsync: beam-teller resetten zodat core 0's pacing de nieuwe frame ziet.
 static void __not_in_flash_func(vsync_cb)(void)
 {
-    if (swap_pending) {
-        int t = fb_front;
-        fb_front = fb_back;
-        fb_back = t;
-        __dmb();
-        swap_pending = false;
-    }
+    scan_active_line = 0;
 }
 
-// Core 1 entry: zet eerst de FPU aan (CP10/CP11), draai dan de HSTX-outputloop.
-// De pico_hdmi-loop/IRQ's kunnen FPU-instructies bevatten; zonder dit -> NOCP.
+// Core 1: FPU aan (CP10/CP11), dan de HSTX-outputloop draaien.
 static void core1_entry(void)
 {
     *(volatile uint32_t *)0xE000ED88 |= (0xFu << 20);
@@ -82,27 +130,33 @@ void video_hstx_init(void)
     video_output_init(OUT_W, OUT_H);
     video_output_set_scanline_callback(scanline_cb);
     video_output_set_vsync_callback(vsync_cb);
-    // Audio is drained into the Data Island queue from core 1's idle loop.
-    video_output_set_background_task(audio_hdmi_pump);
+    video_output_set_background_task(pipeline_task);
 
     multicore_launch_core1(core1_entry);
 }
 
-uint16_t *video_hstx_backbuffer(void)
+void video_hstx_set_line_source(video_line_source_t src, int lines)
 {
-    // Non-blocking: if the last presented frame hasn't been swapped in yet,
-    // return NULL so the caller skips rendering this frame. This decouples the
-    // emulation (paced at 60 Hz) from the HDMI scanout rate — blocking here
-    // would slave the emulator to the display and run the MSX at the wrong speed.
-    if (swap_pending) return NULL;
-    return fb[fb_back];
+    line_source = NULL;
+    __dmb();
+    src_lines = (lines == 212) ? 212 : 192;
+    for (int i = 0; i < RING_N; i++) ring_line[i] = -1; // ring invalideren
+    __dmb();
+    line_source = src;
 }
 
-void video_hstx_present(uint16_t border)
+void video_hstx_set_border(uint16_t border)
 {
     border565 = border;
-    __dmb(); // back-buffer pixel writes visible before the swap is requested
-    swap_pending = true;
+}
+
+int video_hstx_scan_msx_line(void)
+{
+    int yo = y_off();
+    int sl = (int)scan_active_line;
+    if (sl < yo) return -1;
+    int my = (sl - yo) >> 1;
+    return my >= src_lines ? src_lines : my;
 }
 
 uint32_t video_hstx_frame_count(void)

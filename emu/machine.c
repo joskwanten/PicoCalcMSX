@@ -287,48 +287,75 @@ bool machine_init(const uint8_t *bios, uint32_t bios_size,
     return true;
 }
 
+// Eén beam-lijn emuleren: (optionele SDL-sink-render) + 228 T-states Z80 +
+// de VDP-events van deze lijn. De vblank-ISR draait daardoor per definitie
+// ná het zichtbare veld — sprite-multiplexers kloppen zonder snapshot.
+void __not_in_flash_func(machine_do_line)(int line)
+{
+#ifdef BAREMSX_MSX2
+    if (g_msx2) {
+        int active_h = (v9938.regs[9] & 0x80) ? 212 : 192;
+        if (g_line_sink && line < active_h) {
+            static uint32_t linebuf2[512];
+            v9938_render_line(&v9938, linebuf2, line);
+            g_line_sink(line, linebuf2, 512);
+        }
+        z80_run(&cpu, 228);
+        v9938_scanline(&v9938, line);
+        return;
+    }
+#endif
+    if (g_line_sink && line < 192) {
+        static uint32_t linebuf1[256];
+        tms9918_render_line(&tms9918, linebuf1, line);
+        g_line_sink(line, linebuf1, 256);
+    }
+    z80_run(&cpu, 228);
+    if (line == 192)
+        check_and_generate_interrupt(&tms9918);
+}
+
 void __not_in_flash_func(machine_do_cycles)(void)
 {
 #ifdef BAREMSX_MSX2
     if (g_msx2) {
-        // Scanline-granulair: 262 lijnen x 228 T-states (NTSC-cadans); de
-        // V9938 krijgt na elke lijn zijn beam-event (FH/VR/F + IRQs).
-        int active_h = (v9938.regs[9] & 0x80) ? 212 : 192;
-        static uint32_t linebuf[512];
-        for (int line = 0; line < 262; line++) {
-            // Beam-model: render de lijn uit LIVE VRAM vlak vóór de Z80 de
-            // bijbehorende T-states draait — zoals de echte scanout. De
-            // vblank-ISR (sprite-multiplexers!) draait pas ná lijn active_h,
-            // dus alle zichtbare lijnen zijn dan al geleverd: het pre-ISR-
-            // snapshotprobleem bestaat in dit model niet meer.
-            if (g_line_sink && line < active_h) {
-                v9938_render_line(&v9938, linebuf, line);
-                g_line_sink(line, linebuf, 512);
-            }
-            z80_run(&cpu, 228);
-            v9938_scanline(&v9938, line);
-            if (!g_line_sink && line == active_h)
-                memcpy(&v9938_snap, &v9938, sizeof v9938_snap); // legacy-pad
-        }
+        for (int line = 0; line < 262; line++) machine_do_line(line);
         return;
     }
 #endif
     if (g_line_sink) {
-        // MSX1 op dezelfde beam-lus: 262 lijnen, TMS-frame-interrupt zodra
-        // de beam het zichtbare veld verlaat.
-        static uint32_t linebuf[256];
-        for (int line = 0; line < 262; line++) {
-            if (line < 192) {
-                tms9918_render_line(&tms9918, linebuf, line);
-                g_line_sink(line, linebuf, 256);
-            }
-            z80_run(&cpu, 228);
-            if (line == 192)
-                check_and_generate_interrupt(&tms9918);
-        }
+        for (int line = 0; line < 262; line++) machine_do_line(line);
         return;
     }
-    z80_run(&cpu, CYC_PER_INT);
+    z80_run(&cpu, CYC_PER_INT); // legacy frame-lus (Pico tot de refactor)
+}
+
+// ARGB -> RGB565 (zelfde formule als de frontends).
+static inline uint16_t m_argb565(uint32_t px)
+{
+    return (uint16_t)(((px >> 8) & 0xF800) | ((px >> 5) & 0x07E0) | ((px >> 3) & 0x001F));
+}
+
+// Live lijnrender voor core 1 (Pico "race the beam"): geen snapshot, de
+// beam-pacing van de host houdt de cores in de pas.
+int __not_in_flash_func(machine_render_line_565)(uint16_t *dst, int y)
+{
+    static uint32_t tmp[512]; // alleen core 1 gebruikt dit
+#ifdef BAREMSX_MSX2
+    if (g_msx2) {
+        v9938_render_line(&v9938, tmp, y);
+        for (int i = 0; i < 512; i++) dst[i] = m_argb565(tmp[i]);
+        return 512;
+    }
+#endif
+    tms9918_render_line(&tms9918, tmp, y);
+    for (int i = 0; i < 256; i++) dst[i] = m_argb565(tmp[i]);
+    return 256;
+}
+
+uint16_t machine_border_565(void)
+{
+    return m_argb565(machine_get_background_color());
 }
 
 #ifdef BAREMSX_MSX2
@@ -485,6 +512,9 @@ uint32_t machine_snapshot_background_color(void)
 
 uint32_t machine_get_background_color(void)
 {
+#ifdef BAREMSX_MSX2
+    if (g_msx2) return v9938_backdrop_color(&v9938);
+#endif
     return tms9918_get_backdrop_color(&tms9918);
 }
 
