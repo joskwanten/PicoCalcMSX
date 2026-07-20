@@ -160,7 +160,7 @@ cmake --build sdl/build
 
 ## Credits
 
-- **Zeta Z80 CPU core** — Manuel Sainz de Baranda y Goñi ([redcode/Z80](https://github.com/redcode/Z80)); fetched separately by `tools/setup-zeta.sh`.
+- **Zeta Z80 CPU core** — Manuel Sainz de Baranda y Goñi ([redcode/Z80](https://github.com/redcode/Z80)), **LGPL-3.0-or-later**; fetched separately by `tools/setup-zeta.sh` (not bundled), full sources available for relinking as the LGPL requires.
 - **emu2149** (AY-3-8910/YM2149) — Mitsutaka Okazaki (MIT).
 - **pico_hdmi** — fliperama86 (Unlicense), vendored in `third_party/` with a
   DVI-Sock pin remap.

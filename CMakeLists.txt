@@ -53,6 +53,7 @@ add_executable(BareMSX
         emu/util.c
         emu/konami-mega-rom-scc.c
         emu/mapper.c
+        emu/v9938.c
         emu/wd2793.c
         emu/diskrom.c
         emu/emu2149.c

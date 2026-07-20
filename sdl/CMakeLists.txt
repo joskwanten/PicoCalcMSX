@@ -28,6 +28,7 @@ add_executable(msx_sdl
     ${ROOT}/emu/util.c
     ${ROOT}/emu/konami-mega-rom-scc.c
     ${ROOT}/emu/mapper.c
+    ${ROOT}/emu/v9938.c
     ${ROOT}/emu/wd2793.c
     ${ROOT}/emu/diskrom.c
     ${ROOT}/emu/emu2149.c
