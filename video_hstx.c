@@ -87,6 +87,10 @@ static void __not_in_flash_func(scanline_cb)(uint32_t v_scanline, uint32_t activ
 // scanout. Draait als core 1-achtergrondtaak, samen met de audio-pomp.
 static void __not_in_flash_func(pipeline_task)(void)
 {
+    // Audio eerst: de data-island-queue is latency-kritischer dan de
+    // lijnproducer (die 2-3 lijnen speling heeft).
+    audio_hdmi_pump();
+
     video_line_source_t src = line_source;
     if (src) {
         int n = src_lines;
@@ -111,7 +115,6 @@ static void __not_in_flash_func(pipeline_task)(void)
             }
         }
     }
-    audio_hdmi_pump();
 }
 
 // Vsync: beam-teller resetten zodat core 0's pacing de nieuwe frame ziet.

@@ -342,9 +342,13 @@ int main(void)
                 }
             }
             machine_do_line(ln);
+            // Audioring 4x per frame bijvullen i.p.v. 1x aan het einde:
+            // kleinere batches, gelijkmatiger aanbod -> geen underruns.
+            if ((ln & 63) == 63)
+                audio_hdmi_generate();
         }
 
-        audio_hdmi_generate();   // emu-audio -> ring (core 1 pompt naar HDMI)
+        audio_hdmi_generate();   // restje van dit frame
 
         dbg_core0_frames++;
         emu_frames++;
