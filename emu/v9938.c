@@ -99,6 +99,9 @@ void __not_in_flash_func(v9938_write_data)(v9938_context_t *ctx, uint8_t v) // 0
     addr_inc(ctx);
 }
 
+static void cmd_start(v9938_context_t *ctx, uint8_t v);
+static void cmd_cpu_step(v9938_context_t *ctx, uint8_t data);
+
 // Registerschrijfactie met bijwerkingen.
 static void reg_write(v9938_context_t *ctx, int n, uint8_t v)
 {
@@ -117,6 +120,14 @@ static void reg_write(v9938_context_t *ctx, int n, uint8_t v)
         break;
     case 16:
         ctx->palette_first_pending = false; // nieuwe palette-pointer reset het paar
+        break;
+    case 44:
+        // Lopende CPU->VRAM-transfer (HMMC/LMMC): één byte/pixel verwerken.
+        if (ctx->cm == 0xF || ctx->cm == 0xB)
+            cmd_cpu_step(ctx, v);
+        break;
+    case 46:
+        cmd_start(ctx, v);
         break;
     default:
         break;
@@ -161,11 +172,25 @@ uint8_t __not_in_flash_func(v9938_read_status)(v9938_context_t *ctx) // 0x99 in
         ctx->status[1] &= (uint8_t)~S1_FH;
         ctx->line_irq_pending = false;
         break;
-    case 2:
-        // Zonder scanline-klok (komt in de lijn-granulaire lus) wisselen we
-        // VR/HR per read: flank-wachtlussen (bijv. de bootlogo-pacing van de
-        // Philips-BIOS) zien dan altijd een overgang i.p.v. eeuwig VR=1.
-        ctx->status[2] ^= (uint8_t)(S2_VR | S2_HR);
+    case 2: {
+        // Zonder scanline-klok (komt in de lijn-granulaire lus) benaderen we
+        // VR/HR met een fase-teller met ONEVEN modulus: elke pollcadans ziet
+        // dan gegarandeerd beide flanken (een blinde per-read-toggle gaf een
+        // pariteits-livelock bij lussen die S2 2x per iteratie lezen).
+        ctx->s2_phase++;
+        uint8_t dyn = 0;
+        if (ctx->ce_hold) { dyn |= S2_CE; ctx->ce_hold--; }
+        if ((ctx->s2_phase % 5) < 2) dyn |= S2_VR;
+        if ((ctx->s2_phase % 3) < 1) dyn |= S2_HR;
+        ctx->status[2] = (uint8_t)((ctx->status[2] & ~(S2_VR | S2_HR | S2_CE)) | dyn
+                                   | (ctx->status[2] & S2_CE));
+        v = (uint8_t)((v & ~(S2_VR | S2_HR | S2_CE)) | dyn | (ctx->status[2] & S2_CE));
+        break;
+    }
+    case 7:
+        // LMCM: S7-read consumeert de pixel en zet de volgende klaar.
+        if (ctx->cm == 0xA)
+            cmd_cpu_step(ctx, 0);
         break;
     default:
         break;
@@ -196,6 +221,279 @@ void v9938_write_indirect(v9938_context_t *ctx, uint8_t v) // 0x9B out
         reg_write(ctx, n, v);
     if (!(R(ctx, 17) & 0x80)) // AII=0 -> auto-increment
         R(ctx, 17) = (uint8_t)(((n + 1) & 0x3F) | (R(ctx, 17) & 0x80));
+}
+
+// ==== command-engine (§9) ====================================================
+// VRAM-commando's (HMMV/HMMM/YMMM/LMMV/LMMM/LINE/SRCH/PSET/POINT) voeren we
+// synchroon uit bij de R46-write; CE meldt meteen "klaar". CPU-transfers
+// (HMMC/LMMC/LMCM) blijven actief: elke R44-write of S7-read verwerkt één
+// byte/pixel. Beam-race-nauwkeurigheid (Quarth!) komt met de scanline-lus.
+
+#define S2_BD 0x10 // border detected (SRCH)
+
+// Pixel-layout van de actieve bitmap-mode; buiten G4-G7 valt de engine
+// terug op G7-geometrie (zoals fMSX — commando's zijn daar toch ongeldig).
+typedef struct { uint32_t ppb, pitch, width; } cmd_layout_t;
+
+static cmd_layout_t cmd_layout(const v9938_context_t *ctx)
+{
+    switch (v_mode(ctx)) {
+    case 0x0C: return (cmd_layout_t){2, 128, 256}; // G4 (scr5)
+    case 0x10: return (cmd_layout_t){4, 128, 512}; // G5 (scr6)
+    case 0x14: return (cmd_layout_t){2, 256, 512}; // G6 (scr7)
+    case 0x1C: default: return (cmd_layout_t){1, 256, 256}; // G7 (scr8)
+    }
+}
+
+static inline uint32_t cmd_addr(const cmd_layout_t *L, uint32_t x, uint32_t y)
+{
+    return (y * L->pitch + x / L->ppb) & 0x1FFFF;
+}
+
+static uint8_t vdp_point(v9938_context_t *ctx, uint32_t x, uint32_t y)
+{
+    cmd_layout_t L = cmd_layout(ctx);
+    uint8_t b = ctx->vram[cmd_addr(&L, x, y)];
+    switch (L.ppb) {
+    case 1: return b;
+    case 2: return (x & 1) ? (b & 0x0F) : (b >> 4);
+    default: return (uint8_t)((b >> ((3 - (x & 3)) * 2)) & 3);
+    }
+}
+
+// Pixel-write met logische operatie (lage nibble van R46). T-varianten
+// (bit 3) slaan transparant over als de bronkleur 0 is.
+static void vdp_pset(v9938_context_t *ctx, uint32_t x, uint32_t y, uint8_t color, uint8_t lo)
+{
+    if ((lo & 0x08) && color == 0) return;
+    cmd_layout_t L = cmd_layout(ctx);
+    uint32_t addr = cmd_addr(&L, x, y);
+    uint32_t shift, mask;
+    switch (L.ppb) {
+    case 1: shift = 0; mask = 0xFF; break;
+    case 2: shift = (x & 1) ? 0 : 4; mask = 0x0F; break;
+    default: shift = (3 - (x & 3)) * 2; mask = 0x03; break;
+    }
+    uint8_t cur = ctx->vram[addr];
+    uint8_t px = (uint8_t)((cur >> shift) & mask);
+    switch (lo & 0x07) {
+    case 0: px = (uint8_t)(color & mask); break;        // IMP
+    case 1: px &= color; break;                          // AND
+    case 2: px |= color; break;                          // OR
+    case 3: px ^= color; break;                          // XOR
+    case 4: px = (uint8_t)(~color & mask); break;        // NOT
+    default: px = (uint8_t)(color & mask); break;
+    }
+    ctx->vram[addr] = (uint8_t)((cur & ~(mask << shift)) | ((uint32_t)px << shift));
+}
+
+// Latch de parameters uit R32-R45. LET OP: de "NX=0 -> 512 / NY=0 -> 1024"-
+// regel geldt alleen voor BLOK-commando's; bij LINE zijn NX/NY de major/
+// minor-lengtes en betekent 0 gewoon 0 (het Philips-bootlogo tekent zijn
+// horizontale lijnen met NY=0 — met de blok-default werd dat een diagonaal).
+static void cmd_latch(v9938_context_t *ctx)
+{
+    ctx->csx = (uint16_t)(ctx->regs[32] | ((ctx->regs[33] & 1) << 8));
+    ctx->csy = (uint16_t)(ctx->regs[34] | ((ctx->regs[35] & 3) << 8));
+    ctx->cdx = (uint16_t)(ctx->regs[36] | ((ctx->regs[37] & 1) << 8));
+    ctx->cdy = (uint16_t)(ctx->regs[38] | ((ctx->regs[39] & 3) << 8));
+    ctx->cnx = (uint16_t)(ctx->regs[40] | ((ctx->regs[41] & 1) << 8));
+    ctx->cny = (uint16_t)(ctx->regs[42] | ((ctx->regs[43] & 3) << 8));
+    ctx->cdix = (ctx->regs[45] & 0x04) ? -1 : 1;
+    ctx->cdiy = (ctx->regs[45] & 0x08) ? -1 : 1;
+    ctx->cwx = ctx->cwy = 0;
+}
+
+// Blok-defaults (§9.4): 0 betekent maximaal.
+static inline uint16_t blk_nx(const v9938_context_t *ctx) { return ctx->cnx ? ctx->cnx : 512; }
+static inline uint16_t blk_ny(const v9938_context_t *ctx) { return ctx->cny ? ctx->cny : 1024; }
+
+static void cmd_done(v9938_context_t *ctx)
+{
+    ctx->cm = 0;
+    ctx->status[2] = (uint8_t)((ctx->status[2] & ~S2_CE) | S2_TR);
+    // CE een paar S2-reads "bezig" laten lijken: sommige software (o.a. de
+    // Philips-bootanimatie) wacht eerst TOT de engine bezig is en dan tot
+    // hij klaar is — met instant-voltooiing hangt die eerste wachtlus.
+    // (Echte cycle-gebaseerde busy-tijd komt met de scanline-lus.)
+    ctx->ce_hold = 4;
+}
+
+// VRAM-vullingen/kopieën. Byte-commando's (H*) werken per byte, de
+// pixelcommando's (L*) per pixel met logische op.
+static void cmd_run_vram(v9938_context_t *ctx, uint8_t cm)
+{
+    cmd_layout_t L = cmd_layout(ctx);
+    uint8_t clr = ctx->regs[44];
+    switch (cm) {
+    case 0xC: // HMMV: byte-vulling
+        for (uint32_t j = 0; j < blk_ny(ctx); j++) {
+            uint32_t y = (uint32_t)(ctx->cdy + (int32_t)j * ctx->cdiy) & 0x3FF;
+            uint32_t nb = blk_nx(ctx) / L.ppb;
+            for (uint32_t i = 0; i < nb; i++) {
+                uint32_t x = (uint32_t)(ctx->cdx + (int32_t)(i * L.ppb) * ctx->cdix) & (L.width - 1);
+                ctx->vram[cmd_addr(&L, x, y)] = clr;
+            }
+        }
+        break;
+    case 0xD: // HMMM: byte-kopie
+        for (uint32_t j = 0; j < blk_ny(ctx); j++) {
+            uint32_t sy = (uint32_t)(ctx->csy + (int32_t)j * ctx->cdiy) & 0x3FF;
+            uint32_t dy = (uint32_t)(ctx->cdy + (int32_t)j * ctx->cdiy) & 0x3FF;
+            uint32_t nb = blk_nx(ctx) / L.ppb;
+            for (uint32_t i = 0; i < nb; i++) {
+                uint32_t sx = (uint32_t)(ctx->csx + (int32_t)(i * L.ppb) * ctx->cdix) & (L.width - 1);
+                uint32_t dx = (uint32_t)(ctx->cdx + (int32_t)(i * L.ppb) * ctx->cdix) & (L.width - 1);
+                ctx->vram[cmd_addr(&L, dx, dy)] = ctx->vram[cmd_addr(&L, sx, sy)];
+            }
+        }
+        break;
+    case 0xE: // YMMM: byte-kopie in Y, X loopt van DX naar de rand
+        for (uint32_t j = 0; j < blk_ny(ctx); j++) {
+            uint32_t sy = (uint32_t)(ctx->csy + (int32_t)j * ctx->cdiy) & 0x3FF;
+            uint32_t dy = (uint32_t)(ctx->cdy + (int32_t)j * ctx->cdiy) & 0x3FF;
+            uint32_t nb = (ctx->cdix > 0) ? (L.width - ctx->cdx) / L.ppb
+                                          : ctx->cdx / L.ppb + 1;
+            for (uint32_t i = 0; i < nb; i++) {
+                uint32_t x = (uint32_t)(ctx->cdx + (int32_t)(i * L.ppb) * ctx->cdix) & (L.width - 1);
+                ctx->vram[cmd_addr(&L, x, dy)] = ctx->vram[cmd_addr(&L, x, sy)];
+            }
+        }
+        break;
+    case 0x8: // LMMV: pixel-vulling met log. op
+        for (uint32_t j = 0; j < blk_ny(ctx); j++) {
+            uint32_t y = (uint32_t)(ctx->cdy + (int32_t)j * ctx->cdiy) & 0x3FF;
+            for (uint32_t i = 0; i < blk_nx(ctx); i++) {
+                uint32_t x = (uint32_t)(ctx->cdx + (int32_t)i * ctx->cdix) & (L.width - 1);
+                vdp_pset(ctx, x, y, clr, ctx->clo);
+            }
+        }
+        break;
+    case 0x9: // LMMM: pixel-kopie met log. op
+        for (uint32_t j = 0; j < blk_ny(ctx); j++) {
+            uint32_t sy = (uint32_t)(ctx->csy + (int32_t)j * ctx->cdiy) & 0x3FF;
+            uint32_t dy = (uint32_t)(ctx->cdy + (int32_t)j * ctx->cdiy) & 0x3FF;
+            for (uint32_t i = 0; i < blk_nx(ctx); i++) {
+                uint32_t sx = (uint32_t)(ctx->csx + (int32_t)i * ctx->cdix) & (L.width - 1);
+                uint32_t dx = (uint32_t)(ctx->cdx + (int32_t)i * ctx->cdix) & (L.width - 1);
+                vdp_pset(ctx, dx, dy, vdp_point(ctx, sx, sy), ctx->clo);
+            }
+        }
+        break;
+    case 0x7: { // LINE: Bresenham langs de major-as (MAJ = ARG bit 0)
+        bool ymajor = (ctx->regs[45] & 0x01) != 0;
+        uint32_t x = ctx->cdx, y = ctx->cdy;
+        uint32_t maj = ctx->cnx, min = ctx->cny;
+        uint32_t acc = 0;
+        for (uint32_t i = 0; i <= maj; i++) {
+            vdp_pset(ctx, x & (L.width - 1), y & 0x3FF, clr, ctx->clo);
+            acc += min;
+            if (2 * acc >= maj) {
+                acc -= maj;
+                if (ymajor) x = (uint32_t)((int32_t)x + ctx->cdix);
+                else y = (uint32_t)((int32_t)y + ctx->cdiy);
+            }
+            if (ymajor) y = (uint32_t)((int32_t)y + ctx->cdiy);
+            else x = (uint32_t)((int32_t)x + ctx->cdix);
+        }
+        break;
+    }
+    case 0x6: { // SRCH: zoek kleur (EQ = ARG bit 1) langs lijn SY vanaf SX
+        bool neq = (ctx->regs[45] & 0x02) != 0;
+        int32_t x = ctx->csx;
+        ctx->status[2] &= (uint8_t)~S2_BD;
+        while (x >= 0 && x < (int32_t)L.width) {
+            uint8_t c = vdp_point(ctx, (uint32_t)x, ctx->csy & 0x3FF);
+            bool hit = neq ? (c != clr) : (c == clr);
+            if (hit) {
+                ctx->status[2] |= S2_BD;
+                ctx->status[8] = (uint8_t)(x & 0xFF);
+                ctx->status[9] = (uint8_t)(((uint32_t)x >> 8) | 0xFE);
+                break;
+            }
+            x += ctx->cdix;
+        }
+        break;
+    }
+    case 0x5: // PSET
+        vdp_pset(ctx, ctx->cdx & (L.width - 1), ctx->cdy & 0x3FF, clr, ctx->clo);
+        break;
+    case 0x4: // POINT -> S7
+        ctx->status[7] = vdp_point(ctx, ctx->csx & (L.width - 1), ctx->csy & 0x3FF);
+        break;
+    default:
+        break;
+    }
+    cmd_done(ctx);
+}
+
+// R46-write: commando starten.
+static void cmd_start(v9938_context_t *ctx, uint8_t v)
+{
+    uint8_t cm = v >> 4;
+    ctx->clo = v & 0x0F;
+    cmd_latch(ctx);
+#ifdef VDP_CMD_DEBUG
+    fprintf(stderr, "[cmd] %X lo=%X sx=%u sy=%u dx=%u dy=%u nx=%u ny=%u dix=%d diy=%d clr=%02X\n",
+            cm, ctx->clo, ctx->csx, ctx->csy, ctx->cdx, ctx->cdy,
+            ctx->cnx, ctx->cny, ctx->cdix, ctx->cdiy, ctx->regs[44]);
+#endif
+    if (cm == 0) { cmd_done(ctx); return; } // STOP
+    if (cm == 0xF || cm == 0xB) {
+        // HMMC/LMMC: CPU->VRAM; data komt per R44-write binnen.
+        ctx->cm = cm;
+        ctx->status[2] |= S2_CE | S2_TR;
+        return;
+    }
+    if (cm == 0xA) {
+        // LMCM: VRAM->CPU; eerste pixel klaarzetten in S7.
+        ctx->cm = cm;
+        ctx->status[2] |= S2_CE | S2_TR;
+        ctx->status[7] = vdp_point(ctx, ctx->csx, ctx->csy & 0x3FF);
+        return;
+    }
+    cmd_run_vram(ctx, cm);
+}
+
+// Eén stap van een lopende CPU-transfer (R44-write of S7-read).
+static void cmd_cpu_step(v9938_context_t *ctx, uint8_t data)
+{
+    cmd_layout_t L = cmd_layout(ctx);
+    uint32_t x, y;
+    switch (ctx->cm) {
+    case 0xF: // HMMC: byte
+        x = (uint32_t)(ctx->cdx + (int32_t)(ctx->cwx * L.ppb) * ctx->cdix) & (L.width - 1);
+        y = (uint32_t)(ctx->cdy + (int32_t)ctx->cwy * ctx->cdiy) & 0x3FF;
+        ctx->vram[cmd_addr(&L, x, y)] = data;
+        ctx->cwx++;
+        if (ctx->cwx >= blk_nx(ctx) / L.ppb) {
+            ctx->cwx = 0;
+            if (++ctx->cwy >= blk_ny(ctx)) cmd_done(ctx);
+        }
+        break;
+    case 0xB: // LMMC: pixel met log. op
+        x = (uint32_t)(ctx->cdx + (int32_t)ctx->cwx * ctx->cdix) & (L.width - 1);
+        y = (uint32_t)(ctx->cdy + (int32_t)ctx->cwy * ctx->cdiy) & 0x3FF;
+        vdp_pset(ctx, x, y, data, ctx->clo);
+        ctx->cwx++;
+        if (ctx->cwx >= blk_nx(ctx)) {
+            ctx->cwx = 0;
+            if (++ctx->cwy >= blk_ny(ctx)) cmd_done(ctx);
+        }
+        break;
+    case 0xA: // LMCM: volgende pixel in S7
+        ctx->cwx++;
+        if (ctx->cwx >= blk_nx(ctx)) {
+            ctx->cwx = 0;
+            if (++ctx->cwy >= blk_ny(ctx)) { cmd_done(ctx); return; }
+        }
+        x = (uint32_t)(ctx->csx + (int32_t)ctx->cwx * ctx->cdix) & (L.width - 1);
+        y = (uint32_t)(ctx->csy + (int32_t)ctx->cwy * ctx->cdiy) & 0x3FF;
+        ctx->status[7] = vdp_point(ctx, x, y);
+        break;
+    default:
+        break;
+    }
 }
 
 void v9938_vblank(v9938_context_t *ctx)

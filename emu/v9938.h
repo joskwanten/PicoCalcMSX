@@ -52,6 +52,17 @@ typedef struct {
     // Interrupts: frame-IRQ (IE0/S0-F) en lijn-IRQ (IE1/R19, ack via S1).
     bool line_irq_pending;
     v9938_irq_func_t irq_func;
+
+    // Command-engine (R32-R46). VRAM-commando's voeren synchroon uit bij de
+    // R46-write; CPU-transfers (HMMC/LMMC/LMCM) blijven actief en verwerken
+    // per R44-write / S7-read één eenheid. Parameters worden bij de start
+    // gelatcht; cwx/cwy zijn de werk-tellers.
+    uint32_t s2_phase;                     // pseudo-beamfase voor S2 VR/HR
+    uint8_t ce_hold;                       // CE nog N S2-reads hoog houden
+    uint8_t cm, clo;                       // commando (hoge nibble) + log. op
+    uint16_t csx, csy, cdx, cdy, cnx, cny; // gelatchte SX/SY/DX/DY/NX/NY
+    int8_t cdix, cdiy;                     // richting (+1/-1) uit ARG
+    uint16_t cwx, cwy;                     // voortgang binnen het commando
 } v9938_context_t;
 
 void v9938_init(v9938_context_t *ctx);

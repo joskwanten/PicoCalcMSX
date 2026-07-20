@@ -51,3 +51,4 @@ uint32_t machine_get_background_color();
 uint32_t machine_dbg_a9_reads(void);
 uint16_t machine_dbg_pc(void);
 void machine_dbg_dump(void);
+uint8_t machine_dbg_read(uint16_t addr);

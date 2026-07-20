@@ -333,6 +333,12 @@ int main(int argc, char **argv)
                         machine_dbg_pc());
             }
 #endif
+            if (msx2)
+                {
+                    fprintf(stderr, "[ram] F7C0:");
+                    for (int a = 0xF7C0; a < 0xF800; a++) fprintf(stderr, " %02X", machine_dbg_read((uint16_t)a));
+                    fprintf(stderr, "\n");
+                }
             if (0)
             {
                 extern uint8_t ram[];

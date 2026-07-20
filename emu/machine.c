@@ -379,6 +379,12 @@ void machine_dbg_dump(void)
     printf("\n");
 }
 
+// Debug: lees een adres door de ogen van de CPU (werkt voor beide profielen).
+uint8_t machine_dbg_read(uint16_t addr)
+{
+    return slots_read(&slots, addr);
+}
+
 void machine_generate_interrupt(void)
 {
 #ifdef BAREMSX_MSX2
