@@ -42,6 +42,14 @@ void machine_generate_interrupt();
 void machine_get_audio(int16_t* chunk, uint32_t len);
 void machine_get_rendered_image_rgba(uint32_t* image);
 void machine_get_rendered_line(uint32_t* line, int y);
+// Beam-gebaseerd renderen ("race the beam", zonder snapshot/framebuffer in
+// de core): registreer een sink en machine_do_cycles levert elke zichtbare
+// displaylijn aan op het moment dat de geëmuleerde beam 'm passeert,
+// gerenderd uit LIVE VRAM. w = 256 (MSX1) of 512 (MSX2). Zonder sink geldt
+// het oude snapshot-model (Pico-HDMI-pad, tot de video_hstx-refactor).
+typedef void (*machine_line_sink_t)(int y, const uint32_t *px, int w);
+void machine_set_line_sink(machine_line_sink_t sink);
+
 void machine_snapshot_vdp(void);                       // core 0: kopieer VDP-state
 void machine_render_snapshot_line(uint32_t* line, int y); // core 1: render uit snapshot
 uint32_t machine_snapshot_background_color(void);

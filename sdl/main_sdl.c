@@ -87,6 +87,16 @@ static int dsk_sector_io(void *ctx, uint32_t lba, uint8_t *buf, bool write)
     return n == 512 ? 0 : -1;
 }
 
+// Beam-sink: machine_do_cycles levert elke lijn (live VRAM, beam-positie);
+// wij schrijven 'm in het actieve framebuffer.
+static uint32_t *g_sink_fb = NULL;
+static int g_sink_w = 256;
+static void line_sink(int y, const uint32_t *px, int w)
+{
+    if (g_sink_fb && w == g_sink_w)
+        memcpy(&g_sink_fb[(size_t)y * w], px, (size_t)w * sizeof(uint32_t));
+}
+
 // Dump een ARGB-framebuffer als PPM (headless test: kijken wat er op het
 // scherm staat zonder venster-interactie).
 static void dump_ppm(const char *path, const uint32_t *fb, int w, int h)
@@ -301,6 +311,12 @@ int main(int argc, char **argv)
     }
     static uint32_t fb2[512 * 212];  // MSX2-framebuffer
     static uint32_t line2[512];
+    (void)line2;
+
+    // Beam-model: de machine levert lijnen tijdens machine_do_cycles.
+    g_sink_fb = msx2 ? fb2 : fb;
+    g_sink_w = dw;
+    machine_set_line_sink(line_sink);
 
     const double freq = (double)SDL_GetPerformanceFrequency();
     uint64_t next = SDL_GetPerformanceCounter();
@@ -310,20 +326,8 @@ int main(int argc, char **argv)
     while (running) {
         // Headless test: na N frames het scherm dumpen en stoppen.
         if (arg_frames > 0 && frame_no >= arg_frames) {
-            machine_snapshot_vdp();
-            if (msx2) {
-                for (int y = 0; y < dh; y++) {
-                    machine_render_snapshot_line_wide(line2, y);
-                    memcpy(&fb2[y * dw], line2, (size_t)dw * sizeof(uint32_t));
-                }
-                if (arg_dump) dump_ppm(arg_dump, fb2, dw, dh);
-            } else {
-                for (int y = 0; y < MSX_H; y++) {
-                    machine_render_snapshot_line(line, y);
-                    memcpy(&fb[y * MSX_W], line, sizeof(line));
-                }
-                if (arg_dump) dump_ppm(arg_dump, fb, MSX_W, MSX_H);
-            }
+            // Beam-model: framebuffers zijn al gevuld door de sink.
+            if (arg_dump) dump_ppm(arg_dump, msx2 ? fb2 : fb, dw, dh);
 #ifdef BAREMSX_MSX2
             if (msx2) {
                 extern v9938_context_t v9938;
@@ -382,21 +386,9 @@ int main(int argc, char **argv)
         if (SDL_GetQueuedAudioSize(adev) < AUDIO_SAMPLE_RATE) // < ~0.25 s buffered
             SDL_QueueAudio(adev, audio, sizeof(audio));
 
-        // Render the VDP snapshot into the texture.
-        machine_snapshot_vdp();
-        if (msx2) {
-            for (int y = 0; y < dh; y++) {
-                machine_render_snapshot_line_wide(line2, y);
-                memcpy(&fb2[y * dw], line2, (size_t)dw * sizeof(uint32_t));
-            }
-            SDL_UpdateTexture(tex, NULL, fb2, dw * (int)sizeof(uint32_t));
-        } else {
-            for (int y = 0; y < MSX_H; y++) {
-                machine_render_snapshot_line(line, y);
-                memcpy(&fb[y * MSX_W], line, sizeof(line));
-            }
-            SDL_UpdateTexture(tex, NULL, fb, MSX_W * (int)sizeof(uint32_t));
-        }
+        // Beam-model: fb/fb2 is al tijdens machine_do_cycles per lijn gevuld.
+        SDL_UpdateTexture(tex, NULL, msx2 ? (void *)fb2 : (void *)fb,
+                          dw * (int)sizeof(uint32_t));
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);

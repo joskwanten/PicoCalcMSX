@@ -69,6 +69,10 @@ void machine_attach_disk(const uint8_t *disk_rom, uint32_t disk_rom_size,
 
 uint8_t psg_register = 0;
 
+// Beam-render-sink (zie machine.h). NULL = legacy snapshot-model.
+static machine_line_sink_t g_line_sink = NULL;
+void machine_set_line_sink(machine_line_sink_t sink) { g_line_sink = sink; }
+
 volatile uint32_t g_a9_reads = 0; // debug: hoe vaak leest de BIOS de keyboard-rij
 uint32_t machine_dbg_a9_reads(void) { return g_a9_reads; }
 uint16_t machine_dbg_pc(void) { return Z80_PC(cpu); } // debug: Z80 PC (voor hang-diagnose)
@@ -290,21 +294,40 @@ void __not_in_flash_func(machine_do_cycles)(void)
         // Scanline-granulair: 262 lijnen x 228 T-states (NTSC-cadans); de
         // V9938 krijgt na elke lijn zijn beam-event (FH/VR/F + IRQs).
         int active_h = (v9938.regs[9] & 0x80) ? 212 : 192;
+        static uint32_t linebuf[512];
         for (int line = 0; line < 262; line++) {
+            // Beam-model: render de lijn uit LIVE VRAM vlak vóór de Z80 de
+            // bijbehorende T-states draait — zoals de echte scanout. De
+            // vblank-ISR (sprite-multiplexers!) draait pas ná lijn active_h,
+            // dus alle zichtbare lijnen zijn dan al geleverd: het pre-ISR-
+            // snapshotprobleem bestaat in dit model niet meer.
+            if (g_line_sink && line < active_h) {
+                v9938_render_line(&v9938, linebuf, line);
+                g_line_sink(line, linebuf, 512);
+            }
             z80_run(&cpu, 228);
             v9938_scanline(&v9938, line);
-            if (line == active_h) {
-                // Snapshot PRECIES aan het einde van de zichtbare scan: de
-                // frame-IRQ is net geasserteerd maar de ISR heeft nog geen
-                // instructie gedraaid. Sprite-multiplexers (Vampire Killer)
-                // blanken in hun ISR de nét getoonde SAT/kleurtabel-slots —
-                // een post-ISR-snapshot flikkert (les uit msx_rs vram_display).
-                memcpy(&v9938_snap, &v9938, sizeof v9938_snap);
-            }
+            if (!g_line_sink && line == active_h)
+                memcpy(&v9938_snap, &v9938, sizeof v9938_snap); // legacy-pad
         }
         return;
     }
 #endif
+    if (g_line_sink) {
+        // MSX1 op dezelfde beam-lus: 262 lijnen, TMS-frame-interrupt zodra
+        // de beam het zichtbare veld verlaat.
+        static uint32_t linebuf[256];
+        for (int line = 0; line < 262; line++) {
+            if (line < 192) {
+                tms9918_render_line(&tms9918, linebuf, line);
+                g_line_sink(line, linebuf, 256);
+            }
+            z80_run(&cpu, 228);
+            if (line == 192)
+                check_and_generate_interrupt(&tms9918);
+        }
+        return;
+    }
     z80_run(&cpu, CYC_PER_INT);
 }
 
@@ -410,6 +433,7 @@ void machine_generate_interrupt(void)
 #ifdef BAREMSX_MSX2
     if (g_msx2) return; // IRQs komen per scanline uit machine_do_cycles
 #endif
+    if (g_line_sink) return; // idem: beam-lus regelt de frame-interrupt
     check_and_generate_interrupt(&tms9918);
 }
 
