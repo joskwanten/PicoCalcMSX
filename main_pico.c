@@ -182,11 +182,13 @@ int main(void)
                 video_hstx_set_border(0x52BD);
                 video_hstx_set_line_source(menu_line_source, MSX_H);
                 usbkbd_menu_mode(true);
+                menu_render(menu_fb); // eenmalig; daarna alleen bij input
                 while (!menu_start_requested()) {
                     usbkbd_task();
                     int ev;
-                    while ((ev = usbkbd_menu_poll()) >= 0) menu_input((menu_input_t)ev);
-                    menu_render(menu_fb);
+                    bool dirty = false;
+                    while ((ev = usbkbd_menu_poll()) >= 0) { menu_input((menu_input_t)ev); dirty = true; }
+                    if (dirty) menu_render(menu_fb); // geen continue herteken-tearing
                 }
                 usbkbd_menu_mode(false);
 

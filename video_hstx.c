@@ -27,6 +27,10 @@ static uint16_t ring[RING_N][512];
 static volatile int16_t ring_line[RING_N] = {-1, -1, -1, -1};
 static volatile uint16_t ring_w[RING_N];
 
+// Diagnose (uitleesbaar via SWD): callback-aanroepen, pipeline-misses,
+// geproduceerde lijnen.
+volatile uint32_t vhstx_cb_calls, vhstx_miss, vhstx_produced;
+
 static video_line_source_t line_source = NULL;
 static volatile int src_lines = VHSTX_MSX_H; // 192 of 212
 static volatile uint16_t border565 = 0;
@@ -40,6 +44,7 @@ static void __not_in_flash_func(scanline_cb)(uint32_t v_scanline, uint32_t activ
 {
     (void)v_scanline;
     scan_active_line = active_line;
+    vhstx_cb_calls++;
 
     const uint16_t b = border565;
     const uint32_t bw = (uint32_t)b | ((uint32_t)b << 16);
@@ -70,6 +75,7 @@ static void __not_in_flash_func(scanline_cb)(uint32_t v_scanline, uint32_t activ
         w += WORD_ACTIVE;
     } else {
         // Pipeline-miss (hoort niet te gebeuren): border i.p.v. rommel.
+        vhstx_miss++;
         for (int i = 0; i < WORD_ACTIVE; i++) dst[w + i] = bw;
         w += WORD_ACTIVE;
     }
@@ -101,6 +107,7 @@ static void __not_in_flash_func(pipeline_task)(void)
                 ring_w[slot] = (uint16_t)w;
                 __dmb(); // lijndata zichtbaar vóór het label
                 ring_line[slot] = (int16_t)L;
+                vhstx_produced++;
             }
         }
     }
