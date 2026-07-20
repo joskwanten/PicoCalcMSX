@@ -87,6 +87,19 @@ target_include_directories(BareMSX PRIVATE
 # Zeta Z80 core wordt statisch mee-gecompileerd
 target_compile_definitions(BareMSX PRIVATE Z80_STATIC)
 
+# Zeta-Z80 volledig in SRAM (13,7KB): de interpreter is verreweg de heetste
+# code en concurreerde vanuit XIP-flash met de ROM-fetches om de 16KB-cache.
+# Truc: als één sectie compileren en die hernoemen naar .time_critical — het
+# standaard SDK-linkerscript plaatst die in RAM (crt0 kopieert bij boot).
+set_source_files_properties(zeta/Z80.c PROPERTIES
+    COMPILE_OPTIONS "-fno-function-sections;-fno-data-sections")
+add_custom_command(TARGET BareMSX PRE_LINK
+    COMMAND ${CMAKE_OBJCOPY}
+            --rename-section .text=.time_critical.zeta
+            --rename-section .rodata=.time_critical.zetarodata
+            ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/BareMSX.dir/zeta/Z80.c.o
+    COMMENT "Zeta Z80 -> SRAM (.time_critical)")
+
 # Een gefaalde malloc moet NULL teruggeven (het ROM-laadpad handelt dat af),
 # niet panicken (SDK-default) — dat gaf een stille lockup bij grote ROMs.
 target_compile_definitions(BareMSX PRIVATE PICO_MALLOC_PANIC=0)
@@ -104,7 +117,8 @@ target_compile_definitions(BareMSX PRIVATE BAREMSX_MSX2=1)
 # tools/rom_to_header.py — zitten niet in git). Zonder deze optie bevat de
 # binary géén copyrighted materiaal (publiceerbare build) en is een SD-kaart
 # met een BIOS in system/ vereist. Default: aan als de headers bestaan.
-if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/emu/bios_rom.h AND EXISTS ${CMAKE_CURRENT_LIST_DIR}/emu/nemesis2.h)
+option(BAREMSX_BAKED_ROMS "Bak fallback-BIOS+game in de binary (legacy; alles komt normaal van SD)" OFF)
+if(BAREMSX_BAKED_ROMS AND EXISTS ${CMAKE_CURRENT_LIST_DIR}/emu/bios_rom.h AND EXISTS ${CMAKE_CURRENT_LIST_DIR}/emu/nemesis2.h)
     set(_baked_default ON)
 else()
     set(_baked_default OFF)
