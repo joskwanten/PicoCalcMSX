@@ -84,6 +84,7 @@ static void machine_line_source(uint16_t *dst, int line, int *w)
 // Pacing-telemetrie (SWD-uitleesbaar): waar wacht de hoofdlus en wat ziet hij?
 volatile int dbg_pace_ln = -99, dbg_pace_scan = -99;
 volatile uint32_t dbg_core0_frames = 0;
+volatile uint32_t dbg_overruns = 0; // frame-flank gemist (emulatie te laat klaar)
 // XIP-integriteit: som van de eerste 4KB van het (gestagede) game-ROM,
 // per frame herberekend; mismatches tellen = runtime-XIP-corruptie.
 volatile uint32_t dbg_xip_ref = 0, dbg_xip_bad = 0, dbg_xip_checks = 0;
@@ -380,22 +381,19 @@ int main(void)
 #ifdef BAREMSX_USB_KEYBOARD
                     usbkbd_task();
 #endif
-                    tight_loop_contents();
+                    // Audio synthetiseren ín de wachttijd: hier heeft core 0
+                    // per definitie voorsprong op de beam, dus dit kost het
+                    // beam-budget niets — en het haalt de synthese uit het
+                    // krappe vblank-staartje (waar hij de frame-flank liet
+                    // missen -> stale-frame-flikker).
+                    audio_hdmi_generate_burst(16);
                 }
             }
             machine_do_line(ln);
-            // Audioring gelijkmatig bijvullen: in het zichtbare veld elke 16
-            // lijnen een KLEINE burst (max 64 samples) en alléén als core 0
-            // ruim vóór de beam ligt — een burst op het moment dat de
-            // voorsprong minimaal is laat de producer stale lijnen renderen
-            // (zichtbaar als glitches op een vaste schermhoogte). In vblank
-            // de grote top-up.
-            if ((ln & 15) == 15) {
-                if (ln >= vis_h)
-                    audio_hdmi_generate_burst(1200);
-                else if (video_hstx_scan_msx_line() < ln - 9)
-                    audio_hdmi_generate_burst(64);
-            }
+            // Vangnet: in vblank af en toe bijvullen (de hoofdaanvoer zit in
+            // de pacing-wachtlus hierboven, waar core 0 tóch idle is).
+            if (ln >= vis_h && (ln & 15) == 15)
+                audio_hdmi_generate_burst(256);
         }
 
         audio_hdmi_generate();   // restje van dit frame
@@ -406,6 +404,8 @@ int main(void)
             dbg_xip_checks++;
             if (xip_sum(dbg_xip_ptr) != dbg_xip_ref) dbg_xip_bad++;
         }
+
+        if (video_hstx_frame_count() != f_start) dbg_overruns++;
 
         // Frame-flank afwachten — maar ALLEEN als we nog in het displayframe
         // zitten waarin we begonnen. De vblank-staart (50 lijnen emulatie +
