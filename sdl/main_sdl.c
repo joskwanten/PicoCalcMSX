@@ -327,8 +327,9 @@ int main(int argc, char **argv)
 #ifdef BAREMSX_MSX2
             if (msx2) {
                 extern v9938_context_t v9938;
-                fprintf(stderr, "[vdp] R0=%02X R1=%02X R7=%02X R9=%02X mode=%02X pc=%04X\n",
+                fprintf(stderr, "[vdp] R0=%02X R1=%02X R7=%02X R9=%02X R15=%02X R19=%02X R23=%02X R2=%02X mode=%02X pc=%04X\n",
                         v9938.regs[0], v9938.regs[1], v9938.regs[7], v9938.regs[9],
+                        v9938.regs[15], v9938.regs[19], v9938.regs[23], v9938.regs[2],
                         ((v9938.regs[1] >> 4) & 1) | ((v9938.regs[1] >> 2) & 2) | ((v9938.regs[0] & 0x0E) << 1),
                         machine_dbg_pc());
             }

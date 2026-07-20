@@ -76,8 +76,13 @@ void v9938_write_ctrl(v9938_context_t *ctx, uint8_t v);   // 0x99 out
 void v9938_write_palette(v9938_context_t *ctx, uint8_t v);// 0x9A out
 void v9938_write_indirect(v9938_context_t *ctx, uint8_t v);// 0x9B out
 
-// Frame-einde: statusvlaggen bijwerken + IRQ-lijn (IE0). De aanroeper
-// (machine) regelt de Z80-INT-lijn via irq_func, ack door S0 te lezen.
+// Actuele stand van de INT-lijn (frame- of lijn-IRQ nog niet ge-ackt).
+bool v9938_irq_asserted(v9938_context_t *ctx);
+
+// Scanline-hook: aanroepen na elke ~228 T-states met het lijnnummer
+// (0..261); regelt FH/VR/S0.F + IRQs. v9938_vblank is de frame-granulaire
+// fallback voor aanroepers zonder scanline-lus.
+void v9938_scanline(v9938_context_t *ctx, int line);
 void v9938_vblank(v9938_context_t *ctx);
 
 // Render één displaylijn (0..V9938_LINES-1) naar een V9938_LINE_W-brede

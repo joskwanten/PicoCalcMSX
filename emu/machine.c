@@ -87,10 +87,10 @@ static uint8_t __not_in_flash_func(read_port_impl)(uint8_t port)
             return v9938_read_data(&v9938);
         case 0x99: {
             uint8_t v = v9938_read_status(&v9938);
-            // S0-read ackt de frame-IRQ -> INT-lijn intrekken. (Lijn-IRQ-ack
-            // via S1 volgt zodra de lijn-granulaire lus er is.)
-            if ((v9938.regs[15] & 0x0F) == 0)
-                z80_int(&cpu, Z_FALSE);
+            // Na elke statusread de INT-lijn herberekenen: S0-read ackt de
+            // frame-IRQ, S1-read de lijn-IRQ; de lijn blijft hoog zolang de
+            // andere bron nog hangt (level-triggered).
+            z80_int(&cpu, v9938_irq_asserted(&v9938) ? Z_TRUE : Z_FALSE);
             return v;
         }
         case 0xb5:
@@ -285,6 +285,17 @@ bool machine_init(const uint8_t *bios, uint32_t bios_size,
 
 void __not_in_flash_func(machine_do_cycles)(void)
 {
+#ifdef BAREMSX_MSX2
+    if (g_msx2) {
+        // Scanline-granulair: 262 lijnen x 228 T-states (NTSC-cadans); de
+        // V9938 krijgt na elke lijn zijn beam-událost (FH/VR/F + IRQs).
+        for (int line = 0; line < 262; line++) {
+            z80_run(&cpu, 228);
+            v9938_scanline(&v9938, line);
+        }
+        return;
+    }
+#endif
     z80_run(&cpu, CYC_PER_INT);
 }
 
@@ -388,10 +399,7 @@ uint8_t machine_dbg_read(uint16_t addr)
 void machine_generate_interrupt(void)
 {
 #ifdef BAREMSX_MSX2
-    if (g_msx2) {
-        v9938_vblank(&v9938);
-        return;
-    }
+    if (g_msx2) return; // IRQs komen per scanline uit machine_do_cycles
 #endif
     check_and_generate_interrupt(&tms9918);
 }

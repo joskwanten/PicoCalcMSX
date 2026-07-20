@@ -108,6 +108,10 @@ static void reg_write(v9938_context_t *ctx, int n, uint8_t v)
     n &= 0x3F;
     uint8_t old = ctx->regs[n];
     ctx->regs[n] = v;
+#ifdef VDP_CMD_DEBUG
+    if (n == 23 || n == 19 || n == 2 || n == 9)
+        fprintf(stderr, "[reg] R%d=%02X\n", n, v);
+#endif
     switch (n) {
     case 1:
         // IE0 gaat aan terwijl F al hangt -> INT-lijn meteen op.
@@ -173,18 +177,16 @@ uint8_t __not_in_flash_func(v9938_read_status)(v9938_context_t *ctx) // 0x99 in
         ctx->line_irq_pending = false;
         break;
     case 2: {
-        // Zonder scanline-klok (komt in de lijn-granulaire lus) benaderen we
-        // VR/HR met een fase-teller met ONEVEN modulus: elke pollcadans ziet
-        // dan gegarandeerd beide flanken (een blinde per-read-toggle gaf een
-        // pariteits-livelock bij lussen die S2 2x per iteratie lezen).
+        // VR is echt (per scanline bijgehouden); HR (horizontale blanking)
+        // valt onder onze lijn-granulariteit en wisselt per read met een
+        // oneven-modulusfase, zodat pollende lussen altijd flanken zien.
+        // CE blijft na een commando een paar reads hoog (zie cmd_done).
         ctx->s2_phase++;
         uint8_t dyn = 0;
         if (ctx->ce_hold) { dyn |= S2_CE; ctx->ce_hold--; }
-        if ((ctx->s2_phase % 5) < 2) dyn |= S2_VR;
         if ((ctx->s2_phase % 3) < 1) dyn |= S2_HR;
-        ctx->status[2] = (uint8_t)((ctx->status[2] & ~(S2_VR | S2_HR | S2_CE)) | dyn
-                                   | (ctx->status[2] & S2_CE));
-        v = (uint8_t)((v & ~(S2_VR | S2_HR | S2_CE)) | dyn | (ctx->status[2] & S2_CE));
+        ctx->status[2] = (uint8_t)((ctx->status[2] & ~(S2_HR | S2_CE)) | dyn);
+        v = (uint8_t)((v & ~(S2_HR | S2_CE)) | dyn | (ctx->status[2] & S2_VR));
         break;
     }
     case 7:
@@ -496,12 +498,46 @@ static void cmd_cpu_step(v9938_context_t *ctx, uint8_t data)
     }
 }
 
+// Scanline-hook: de machine draait per displaylijn ~228 T-states Z80 en
+// meldt daarna de lijn. Hier leven de echte VR- en FH-semantiek:
+//  - FH wordt gezet zodra de beam lijn R19 passeert, ONGEACHT IE1 (IE1
+//    bepaalt alleen de INT-lijn); software pollt FH ook met IRQs uit.
+//  - VR is hoog in de verticale blanking (lijn >= actieve hoogte).
+//  - Op de eerste vblank-lijn: S0.F + frame-IRQ (IE0).
+void v9938_scanline(v9938_context_t *ctx, int line)
+{
+    int active_h = (ctx->regs[9] & 0x80) ? 212 : 192;
+
+    if (line == ctx->regs[19]) {
+        ctx->status[1] |= S1_FH;
+        ctx->line_irq_pending = true;
+        if (IE1(ctx) && ctx->irq_func)
+            ctx->irq_func();
+    }
+
+    if (line < active_h)
+        ctx->status[2] &= (uint8_t)~S2_VR;
+    else
+        ctx->status[2] |= S2_VR;
+
+    if (line == active_h) {
+        ctx->status[0] |= S0_F;
+        if (IE0(ctx) && ctx->irq_func)
+            ctx->irq_func();
+    }
+}
+
+// Frame-granulaire fallback (MSX1-lus / oude aanroepers).
 void v9938_vblank(v9938_context_t *ctx)
 {
-    ctx->status[0] |= S0_F;
-    ctx->status[2] |= S2_VR;
-    if (IE0(ctx) && ctx->irq_func)
-        ctx->irq_func();
+    v9938_scanline(ctx, (ctx->regs[9] & 0x80) ? 212 : 192);
+}
+
+// Hangt de INT-lijn (nog) hoog? Frame-IRQ: IE0 && F; lijn-IRQ: IE1 && FH.
+bool v9938_irq_asserted(v9938_context_t *ctx)
+{
+    return (IE0(ctx) && (ctx->status[0] & S0_F)) ||
+           (IE1(ctx) && (ctx->status[1] & S1_FH));
 }
 
 uint32_t v9938_backdrop_color(v9938_context_t *ctx)
