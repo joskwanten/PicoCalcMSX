@@ -28,14 +28,8 @@ static volatile int16_t ring_line[RING_N] = {-1, -1, -1, -1, -1, -1, -1, -1};
 static volatile uint16_t ring_w[RING_N];
 
 // Diagnose (uitleesbaar via SWD): callback-aanroepen, pipeline-misses,
-// geproduceerde lijnen, uitgestelde produceerpogingen (nog-niet-geëmuleerd).
-volatile uint32_t vhstx_cb_calls, vhstx_miss, vhstx_produced, vhstx_defer;
-
-// Emulatievoortgang van core 0 (laatste afgeronde MSX-lijn, 0..261).
-// 261 = "alles klaar" — ook de startwaarde, zodat de menubron (die geen
-// emulatie heeft) nooit geblokkeerd wordt.
-static volatile int16_t emu_line = 261;
-void video_hstx_note_emu_line(int ln) { emu_line = (int16_t)ln; }
+// geproduceerde lijnen.
+volatile uint32_t vhstx_cb_calls, vhstx_miss, vhstx_produced;
 
 static video_line_source_t line_source = NULL;
 static volatile int src_lines = VHSTX_MSX_H; // 192 of 212
@@ -117,16 +111,6 @@ static void __not_in_flash_func(pipeline_task)(void)
             if (L >= n) break;
             int slot = L % RING_N;
             if (ring_line[slot] != L) {
-                // Stale-lijn-preventie: render lijn L pas als core 0 hem al
-                // geëmuleerd heeft (el > L, of core 0 zit in vblank: alles
-                // zichtbaars is klaar). Alleen de eerstvolgende lijn (k==1)
-                // heeft een harde deadline en rendert altijd — een oude lijn
-                // is daar minder erg dan een zwarte miss.
-                int el = emu_line;
-                if (k > 1 && el < 212 && el <= L) {
-                    vhstx_defer++;
-                    break; // latere lijnen zijn dan zeker ook onveilig
-                }
                 int w = 256;
                 src(ring[slot], L, &w);
                 ring_w[slot] = (uint16_t)w;

@@ -473,7 +473,6 @@ int main(void)
                 }
             }
             machine_do_line(ln);
-            video_hstx_note_emu_line(ln); // producer mag t/m deze lijn renderen
             // Vangnet: in vblank af en toe bijvullen (de hoofdaanvoer zit in
             // de pacing-wachtlus hierboven, waar core 0 tóch idle is).
             if (ln >= vis_h && (ln & 15) == 15)
