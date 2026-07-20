@@ -73,6 +73,11 @@ void __not_in_flash_func(tms9918_write)(tms9918_context_t *context, bool mode, u
             if (value & 0x80)
             {
                 context->registers[value & 0x7] = context->latchedData;
+                // Interrupts net aangezet terwijl de F-flag al hangt? Dan de
+                // INT-lijn meteen asserteren (niet pas bij de volgende vblank).
+                if ((value & 0x7) == 1 && GINT(context) &&
+                    (context->vdpStatus & S_INT) && context->interrupt_func)
+                    (*context->interrupt_func)();
             }
             else if (value & 0x40)
             {
@@ -111,8 +116,84 @@ uint8_t __not_in_flash_func(tms9918_read)(tms9918_context_t *context, bool mode)
     }
 }
 
+// Sprite-Y (255 = lijn 0) naar schermlijn van de bovenrand.
+static inline int sprite_screen_y(uint8_t yraw)
+{
+    return (yraw > 238) ? ((int)yraw - 255) : ((int)yraw + 1);
+}
+
+// Statusvlaggen van de sprite-engine (collisie + 5e sprite) één keer per frame
+// berekenen op de LIVE VRAM. De renderers draaien op een snapshot (core 1) en
+// kunnen dus niet in het echte statusregister terugschrijven.
+//  - 5S + nummer: de eerste sprite die als vijfde op één lijn valt.
+//  - C: twee weergegeven sprites (eerste 4 per lijn) met overlappende
+//    patroonbits. Collisie is patroon-gebaseerd: een kleur-0-sprite is
+//    onzichtbaar maar botst gewoon (zo gebruiken games ze als hitbox).
+static void update_sprite_status(tms9918_context_t *context)
+{
+    uint32_t SA = GET_SPRITE_ATTR_TABLE(context);
+    uint32_t SG = GET_SPRITE_GEN_TABLE(context);
+    int sixteen = SIXTEEN(context), mag = MAGNIFIED(context);
+    int H = (sixteen ? 16 : 8) << (mag ? 1 : 0);
+
+    bool have_c = false, have_5s = false;
+
+    for (int ln = 0; ln < 192 && !(have_c && have_5s); ln++) {
+        uint64_t m[4] = {0, 0, 0, 0}; // 256-bit dekkingsmasker van deze lijn
+        int count = 0;
+        for (int s = 0; s < 32; s++) {
+            uint8_t yraw = context->vram[SA + (4 * s)];
+            if (yraw == 208) break;
+            int r = ln - sprite_screen_y(yraw);
+            if (r < 0 || r >= H) continue;
+
+            count++;
+            if (count == 5) {
+                if (!have_5s) {
+                    context->vdpStatus = (uint8_t)((context->vdpStatus & ~0x1F) | S_5S | s);
+                    have_5s = true;
+                }
+                break; // 5e en verder: niet zichtbaar, geen collisie
+            }
+            if (have_c) continue; // alleen nog 5S zoeken
+
+            int xx = context->vram[SA + (4 * s) + 1];
+            uint8_t p = context->vram[SA + (4 * s) + 2];
+            if (context->vram[SA + (4 * s) + 3] & 0x80) xx -= 32; // early clock
+
+            int rowidx = mag ? (r >> 1) : r;
+            uint16_t bits;
+            if (sixteen)
+                bits = (uint16_t)((context->vram[SG + 8 * (p & 0xFC) + rowidx] << 8) |
+                                  context->vram[SG + 8 * (p & 0xFC) + 16 + rowidx]);
+            else
+                bits = (uint16_t)(context->vram[SG + 8 * p + rowidx] << 8);
+
+            int total = (sixteen ? 16 : 8) << (mag ? 1 : 0);
+            for (int j = 0; j < total; j++) {
+                int col = mag ? (j >> 1) : j;
+                if (!(bits & (0x8000 >> col))) continue;
+                int px = xx + j;
+                if (px < 0 || px > 255) continue;
+                uint64_t bit = 1ull << (px & 63);
+                if (m[px >> 6] & bit) {
+                    context->vdpStatus |= S_C;
+                    have_c = true;
+                } else {
+                    m[px >> 6] |= bit;
+                }
+            }
+        }
+    }
+}
+
 void check_and_generate_interrupt(tms9918_context_t *context)
 {
+#ifndef VDP_NO_SPRITE_STATUS
+    if (!GET_BLANK(context) && MODE(context) != 1)
+        update_sprite_status(context); // sprites bestaan niet in text mode
+#endif
+
     // De F-flag (VBlank) wordt ELKE frame gezet, ongeacht de interrupt-enable.
     // (Games die met interrupts uit op deze flag pollen hingen anders.)
     context->vdpStatus |= S_INT;
@@ -220,76 +301,14 @@ void renderScreen2(tms9918_context_t *context, uint32_t *image) {
     }
 }
 
+static void render_line_sprites(tms9918_context_t *context, uint32_t *line, int ln);
+
+// Full-frame variant: delegeert per lijn naar render_line_sprites, zodat de
+// sprite-regels (4-per-lijn, prioriteit, EC, MAG, transparantie) maar op één
+// plek bestaan.
 void renderSprites(tms9918_context_t *context, uint32_t *image) {
-    uint32_t SA = GET_SPRITE_ATTR_TABLE(context);
-    uint32_t SG = GET_SPRITE_GEN_TABLE(context);
-
-    for (uint32_t s = 0; s < 32; s++) {
-        uint32_t y = context->vram[SA + (4 * s)];
-        uint32_t x = context->vram[SA + (4 * s) + 1];
-        uint32_t p = context->vram[SA + (4 * s) + 2];
-        uint32_t c = context->vram[SA + (4 * s) + 3] & 0xf;
-        uint32_t ec = (context->vram[SA + (4 * s) + 3] & 0x80) != 0;
-
-        // According to Sean Young its TMS9918 document
-        // thie early clock flag will shift the x position
-        // by 32 pixels
-        if (ec) {
-            x += 32;
-        }
-
-        if (y == 208) {
-            // End of sprite attribute table
-            break;
-        }
-
-        // Special meaning of the Y position
-        // we use 0,0 as origin (top, left) and negative
-        // values for offscreen. The TMS9918 uses line 255
-        // as zero and 0 as 1, so therefore we substract 255-y
-        // if value is bigger then 238 (still a line is rendered in case of 16x16)
-        if (y > 238) {
-            y = 0 - (255 - y);
-        } else {
-            y += 1;
-        }
-
-        // Get the sprite pattern
-        if (SIXTEEN(context)) {
-            for (uint32_t i = 0; i < 32; i++) {
-                uint32_t sy = (i > 7 && i < 16) || (i > 23) ? 8 : 0;
-                uint32_t sx = (i > 15) ? 8 : 0;
-                uint32_t s = context->vram[SG + (8 * (p & 0xfc)) + i];
-                for (uint32_t j = 0; j < 8; j++) {
-                    if (s & (1 << (7 - j))) {
-                        uint32_t ypos = y + sy + (i % 8);
-                        uint32_t xpos = x + sx + j;
-                        if (ypos >= 0 && ypos < 208 && xpos >= 0 && xpos <= 255) {
-                            image[(256 * ypos) + xpos] = palette[c];
-                            // if (this.spriteDetectionBuffer[(256 * ypos) + xpos]) {
-                            //     this.vdpStatus |= StatusFlags.S_C;
-                            // } else {
-                            //     this.spriteDetectionBuffer[(256 * ypos) + xpos] = s + 1;
-                            // }
-                        }
-                    }
-                }
-            }
-        } else {
-            for (uint32_t i = 0; i < 8; i++) {
-                uint32_t s = context->vram[SG + (8 * p) + i];
-                for (uint32_t j = 0; j < 8; j++) {
-                    if (s & (1 << (7 - j))) {
-                        uint32_t ypos = y + i;
-                        uint32_t xpos = x + j;
-                        if (ypos >= 0 && ypos < 208 && xpos >= 0 && xpos <= 255) {
-                            image[(256 * ypos) + xpos] = palette[c];
-                        }
-                    }
-                }
-            }
-        }
-    }
+    for (int ln = 0; ln < 192; ln++)
+        render_line_sprites(context, &image[256 * ln], ln);
 }
 
 // ---- Per-scanline renderers (embedded: geen volledige framebuffer nodig) ----
@@ -355,39 +374,54 @@ static void __not_in_flash_func(render_line_screen2)(tms9918_context_t *context,
     }
 }
 
+// Sprites op één displaylijn, volgens de echte TMS9918-regels:
+//  - maximaal 4 sprites per lijn (in tabelvolgorde); de rest is onzichtbaar
+//  - sprite 0 heeft de HOOGSTE prioriteit: we tekenen de 4 in omgekeerde
+//    volgorde zodat lagere nummers bovenop komen
+//  - kleur 0 is transparant (telt wél mee voor de lijnlimiet en collisie)
+//  - early clock (attr bit 7) schuift de sprite 32 pixels naar LINKS
+//  - MAG (R1 bit 0) verdubbelt de sprite in beide richtingen
 static void __not_in_flash_func(render_line_sprites)(tms9918_context_t *context, uint32_t *line, int ln)
 {
     uint32_t SA = GET_SPRITE_ATTR_TABLE(context);
     uint32_t SG = GET_SPRITE_GEN_TABLE(context);
-    int sixteen = SIXTEEN(context);
-    int H = sixteen ? 16 : 8;
+    int sixteen = SIXTEEN(context), mag = MAGNIFIED(context);
+    int H = (sixteen ? 16 : 8) << (mag ? 1 : 0);
 
-    for (int s = 0; s < 32; s++) {
+    // Verzamel de (max 4) sprites die deze lijn raken, in tabelvolgorde.
+    int idx[4], n = 0;
+    for (int s = 0; s < 32 && n < 4; s++) {
         uint8_t yraw = context->vram[SA + (4 * s)];
         if (yraw == 208) break; // einde sprite attribute table
+        int r = ln - sprite_screen_y(yraw);
+        if (r >= 0 && r < H) idx[n++] = s;
+    }
 
+    for (int k = n - 1; k >= 0; k--) {
+        int s = idx[k];
+        uint8_t yraw = context->vram[SA + (4 * s)];
         int xx = context->vram[SA + (4 * s) + 1];
         uint8_t p = context->vram[SA + (4 * s) + 2];
         uint8_t attr = context->vram[SA + (4 * s) + 3];
         uint32_t c = attr & 0xf;
-        if (attr & 0x80) xx += 32; // early clock (zoals de originele code)
+        if (attr & 0x80) xx -= 32; // early clock: 32 pixels naar links
+        if (c == 0) continue;      // transparant: niets te tekenen
 
-        int Y = (yraw > 238) ? ((int)yraw - 255) : ((int)yraw + 1);
-        int r = ln - Y;
-        if (r < 0 || r >= H) continue;
+        int r = ln - sprite_screen_y(yraw);
+        int rowidx = mag ? (r >> 1) : r;
+        uint16_t bits;
+        if (sixteen)
+            bits = (uint16_t)((context->vram[SG + 8 * (p & 0xFC) + rowidx] << 8) |
+                              context->vram[SG + 8 * (p & 0xFC) + 16 + rowidx]);
+        else
+            bits = (uint16_t)(context->vram[SG + 8 * p + rowidx] << 8);
 
-        if (sixteen) {
-            uint8_t lb = context->vram[SG + (8 * (p & 0xfc)) + r];
-            uint8_t rb = context->vram[SG + (8 * (p & 0xfc)) + 16 + r];
-            for (int j = 0; j < 8; j++) {
-                if (lb & (1 << (7 - j))) { int xp = xx + j;     if (xp >= 0 && xp < 256) line[xp] = palette[c]; }
-                if (rb & (1 << (7 - j))) { int xp = xx + 8 + j; if (xp >= 0 && xp < 256) line[xp] = palette[c]; }
-            }
-        } else {
-            uint8_t b = context->vram[SG + (8 * p) + r];
-            for (int j = 0; j < 8; j++) {
-                if (b & (1 << (7 - j))) { int xp = xx + j; if (xp >= 0 && xp < 256) line[xp] = palette[c]; }
-            }
+        int total = (sixteen ? 16 : 8) << (mag ? 1 : 0);
+        for (int j = 0; j < total; j++) {
+            int col = mag ? (j >> 1) : j;
+            if (!(bits & (0x8000 >> col))) continue;
+            int xp = xx + j;
+            if (xp >= 0 && xp < 256) line[xp] = palette[c];
         }
     }
 }
