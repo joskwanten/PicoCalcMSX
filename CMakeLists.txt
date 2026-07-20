@@ -56,6 +56,7 @@ add_executable(BareMSX
         emu/v9938.c
         zip.c
         third_party/miniz/miniz.c
+        emu/sccplus.c
         emu/rtc.c
         emu/mappedram.c
         emu/wd2793.c

@@ -1,3 +1,6 @@
+#ifndef KONAMI_MEGA_ROM_SCC_H
+#define KONAMI_MEGA_ROM_SCC_H
+
 #include <stdint.h>
 
 #define SCC_PAGE_SIZE 0x2000
@@ -17,3 +20,10 @@ int16_t scc_process(konami_scc_t* context);
 void scc_set_rom(konami_scc_t* context, uint8_t* rom, uint32_t size);
 uint8_t scc_read(void* context, uint16_t address);
 void scc_write(void* context, uint16_t address, uint8_t value);
+
+// Directe registertoegang (layout als 9800-98FF: 00-7F golven, 80-89 freq,
+// 8A-8E volume, 8F enable) — gebruikt door de SCC-I/Sound Cartridge (sccplus).
+void scc_core_write(konami_scc_t* context, uint8_t reg, uint8_t value);
+uint8_t scc_core_read(konami_scc_t* context, uint8_t reg);
+
+#endif // KONAMI_MEGA_ROM_SCC_H

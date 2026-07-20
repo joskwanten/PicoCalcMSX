@@ -369,9 +369,11 @@ int main(void)
     }
 
     // Disk-interface (slot 2): DISK.ROM uit system/ + gekozen .dsk als
-    // drive A. Werkt in beide profielen (MSX2: naast de mapper-RAM in 3-2).
+    // drive A. In het MSX2-profiel alleen aankoppelen als er echt een disk
+    // gekozen is (interface + Konami-SCC-cart botsen anders in de boot —
+    // known issue, nog uitzoeken).
     static uint8_t disk_rom[16384];
-    if (sd_ok && diskrom_name[0]) {
+    if (sd_ok && diskrom_name[0] && (!boot_msx2 || g_dsk_name[0])) {
         long drs = storage_read(SD_SYSTEM, diskrom_name, disk_rom, sizeof disk_rom);
         if (drs > 0) {
             uint8_t sides = 0;
@@ -407,7 +409,8 @@ int main(void)
     if (boot_msx2)
         init_ok = machine_init_msx2(use_bios, use_bios_size,
                                     sd_bios + 32768, msx2ext_size,
-                                    use_game, use_game_size, vdp_arena);
+                                    use_game, use_game_size, vdp_arena,
+                                    NULL /* geen 64KB vrij voor SCC-I; PSRAM later */);
     else
 #endif
         init_ok = machine_init(use_bios, use_bios_size, use_game, use_game_size,

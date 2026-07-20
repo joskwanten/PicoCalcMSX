@@ -19,6 +19,7 @@
 #include "v9938.h"
 #include "rtc.h"
 #include "mappedram.h"
+#include "sccplus.h"
 #endif
 #include "pico.h"
 
@@ -68,6 +69,7 @@ int machine_display_height(void) { return g_msx2 ? 212 : 192; }
 v9938_context_t v9938;
 static rtc_t rtc;
 static mappedram_t mapram;
+static sccplus_t sccplus; // Sound Cartridge in slot 2 (alleen met host-RAM)
 #endif
 
 void machine_attach_disk(const uint8_t *disk_rom, uint32_t disk_rom_size,
@@ -203,6 +205,19 @@ static void __not_in_flash_func(write_port_impl)(uint8_t port, uint8_t value)
         break;
     }
 }
+
+#ifdef SCCPLUS_DEBUG
+// Tijdelijk: zie welke slotconfiguratie BFFE/9000-writes ontvangt.
+static void dbg_slots_write(void *ctx, uint16_t a, uint8_t v)
+{
+    if (a == 0xBFFE || a == 0x9000 || a == 0x9002 || a == 0xFFFF) {
+        extern uint16_t machine_dbg_pc(void);
+        fprintf(stderr, "[mw] %04X=%02X slotreg=%02X pc=%04X\n",
+                a, v, slots_get_slot_register(&slots), machine_dbg_pc());
+    }
+    slots_write((slots_context_t *)ctx, a, v);
+}
+#endif
 
 // Zeta-Z80: 16-bit poort-adressen + void*-context; MSX decodeert alleen de lage 8 bits.
 static zuint8 zeta_in(void *ctx, zuint16 port) { (void)ctx; return read_port_impl((uint8_t)port); }
@@ -406,7 +421,7 @@ static void romwin_write(void *ctx, uint16_t a, uint8_t v) { (void)ctx; (void)a;
 bool machine_init_msx2(const uint8_t *bios, uint32_t bios_size,
                        const uint8_t *ext, uint32_t ext_size,
                        const uint8_t *game, uint32_t game_size,
-                       uint8_t *vram128k)
+                       uint8_t *vram128k, uint8_t *sccplus_ram64k)
 {
     (void)bios_size;
     g_msx2 = true;
@@ -432,26 +447,40 @@ bool machine_init_msx2(const uint8_t *bios, uint32_t bios_size,
     } else {
         slots_add_slot(&slots, 1, NULL, empty_read, empty_write);
     }
-    slots_add_slot(&slots, 2, NULL, empty_read, empty_write); // cart 2 (later)
-
-    // Slot 3 geëxpandeerd, NMS-8245-indeling: 3-0 sub-ROM, 3-2 mapper-RAM,
-    // 3-3 diskcontroller — precies waar de MSX2-BIOS hem verwacht.
-    if (disk_attached)
-        printf("[machine] disk interface in subslot 3-3 (%u KB DISK.ROM, %u sides)\n",
+    // Disk in PLAIN slot 2. De authentieke NMS-8245-plek is subslot 3-3,
+    // maar met de disk dáár raakt een Konami-SCC-game (KV2) in een
+    // boot-loop — een nog niet gevonden bug in onze expanded-slot-emulatie
+    // (zelfde familie als het oude MSX1-issue). Tot die gevonden is: slot 2.
+    if (disk_attached) {
+        printf("[machine] disk interface in slot 2 (%u KB DISK.ROM, %u sides)\n",
                (unsigned)(diskrom.rom_size / 1024), diskrom.fdc.sides);
+        slots_add_slot(&slots, 2, &diskrom, diskrom_read, diskrom_write);
+    } else if (sccplus_ram64k) {
+        // Konami Sound Cartridge (SCC-I) — alleen zonder disk (beide willen
+        // slot 2); nodig voor Snatcher/SD Snatcher (werk in uitvoering).
+        sccplus_init(&sccplus, sccplus_ram64k, &konami_scc);
+        printf("[machine] Sound Cartridge (SCC-I, 64KB) in slot 2\n");
+        slots_add_slot(&slots, 2, &sccplus, sccplus_read, sccplus_write);
+    } else {
+        slots_add_slot(&slots, 2, NULL, empty_read, empty_write);
+    }
+
+    // Slot 3 geëxpandeerd, NMS-8245-indeling: 3-0 sub-ROM, 3-2 mapper-RAM
+    // (3-3 is de echte disk-plek — zie hierboven).
     subslots3.subslot_register = 0;
     subslots_add_subslot(&subslots3, 0, &ext_win, romwin_read, romwin_write); // sub-ROM (begrensd)
     subslots_add_subslot(&subslots3, 1, NULL, empty_read, empty_write);
     subslots_add_subslot(&subslots3, 2, &mapram, mappedram_read, mappedram_write);
-    if (disk_attached)
-        subslots_add_subslot(&subslots3, 3, &diskrom, diskrom_read, diskrom_write);
-    else
-        subslots_add_subslot(&subslots3, 3, NULL, empty_read, empty_write);
+    subslots_add_subslot(&subslots3, 3, NULL, empty_read, empty_write);
     slots_add_slot(&slots, 3, &subslots3, subslots_read, subslots_write);
 
     cpu.context = &slots;
     cpu.fetch_opcode = cpu.fetch = cpu.nop = cpu.read = (Z80Read)slots_read;
+#ifdef SCCPLUS_DEBUG
+    cpu.write = (Z80Write)dbg_slots_write;
+#else
     cpu.write = (Z80Write)slots_write;
+#endif
     cpu.in = zeta_in;
     cpu.out = zeta_out;
     cpu.halt = Z_NULL;

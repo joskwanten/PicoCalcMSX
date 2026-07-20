@@ -35,10 +35,13 @@ void machine_disk_swap(uint8_t sides, uint32_t total_sectors);
 // dit kan sinds de lijn-pipeline óók op een kale Pico 2). bios = 32KB main-
 // BIOS, ext = sub-ROM (begrensd op ext_size), vram128k = door de host
 // geleverd 128KB-VRAM (op de Pico: de menu-arena — het menu is dan klaar).
+// sccplus_ram64k: optioneel 64KB voor een Konami Sound Cartridge (SCC-I) in
+// slot 2 — vereist door Snatcher/SD Snatcher. NULL = geen Sound Cartridge
+// (op de kale Pico is er geen 64KB vrij; wacht op PSRAM).
 bool machine_init_msx2(const uint8_t *bios, uint32_t bios_size,
                        const uint8_t *ext, uint32_t ext_size,
                        const uint8_t *game, uint32_t game_size,
-                       uint8_t *vram128k);
+                       uint8_t *vram128k, uint8_t *sccplus_ram64k);
 bool machine_is_msx2(void);
 int machine_display_width(void);  // 256 (MSX1) of 512 (MSX2)
 int machine_display_height(void); // 192 (MSX1) of 212 (MSX2)

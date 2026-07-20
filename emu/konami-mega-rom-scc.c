@@ -93,15 +93,24 @@ void __not_in_flash_func(scc_write)(void* context, uint16_t address, uint8_t val
     if (address % 0x2000 >= 0x1800) {
         if (c->selected_pages[(address >> 13) % 8] == 0x3f) {
             uint32_t reg = (address % 0x2000) - 0x1800;
-            if (reg <= 255) {
-                c->scc[reg] = value;
-                if (reg >= 0x80 && reg <= 0x89) {
-                    uint32_t chan = (reg - 0x80) >> 1;
-                    c->step[chan] = compute_step(c, chan);
-                }
-            }
+            if (reg <= 255)
+                scc_core_write(c, (uint8_t)reg, value);
         }
     } else {
         c->selected_pages[(address >> 13) % 8] = value & 0x3f;
     }
+}
+
+void __not_in_flash_func(scc_core_write)(konami_scc_t* c, uint8_t reg, uint8_t value)
+{
+    c->scc[reg] = value;
+    if (reg >= 0x80 && reg <= 0x89) {
+        uint32_t chan = (reg - 0x80) >> 1;
+        c->step[chan] = compute_step(c, chan);
+    }
+}
+
+uint8_t __not_in_flash_func(scc_core_read)(konami_scc_t* c, uint8_t reg)
+{
+    return c->scc[reg];
 }

@@ -313,7 +313,10 @@ int main(int argc, char **argv)
     }
 
     // --- Disk-interface (slot 2): DISK.ROM + WD2793, drive A = cfg.diskA ---
-    if (disk_rom_size > 0) {
+    // MSX2: alleen aankoppelen als er echt een disk gekozen is — met de
+    // interface aanwezig maar zonder zinvolle taak hangt de boot van een
+    // Konami-SCC-cart (KV2) in de disk-ROM-init (known issue, nog uitzoeken).
+    if (disk_rom_size > 0 && (!msx2 || cfg.diskA[0])) {
         uint8_t sides = 0;
         uint32_t total_sectors = 0;
         if (cfg.diskA[0] && zip_is_zip(cfg.diskA)) {
@@ -347,8 +350,9 @@ int main(int argc, char **argv)
            cfg.diskA[0] ? cfg.diskA : "(empty)");
 
     static uint8_t vram128k[V9938_VRAM_SIZE];
+    static uint8_t sccplus_ram[65536];
     bool ok = msx2
-        ? machine_init_msx2(bios, sizeof bios, ext_rom, sizeof ext_rom, game, game_size, vram128k)
+        ? machine_init_msx2(bios, sizeof bios, ext_rom, sizeof ext_rom, game, game_size, vram128k, sccplus_ram)
         : machine_init(bios, sizeof bios, game, game_size, game2, game2_size);
     if (!ok) {
         fprintf(stderr, "machine_init failed\n");
@@ -383,6 +387,7 @@ int main(int argc, char **argv)
         if (arg_frames > 0 && frame_no >= arg_frames) {
             // Beam-model: framebuffers zijn al gevuld door de sink.
             if (arg_dump) dump_ppm(arg_dump, msx2 ? fb2 : fb, dw, dh);
+            machine_dbg_dump();
 #ifdef SCC_DEBUG
             {
                 extern volatile uint32_t sccr_bf50_bank, sccr_bf50_val, sccr_bf50_hits;

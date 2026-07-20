@@ -31,6 +31,7 @@ add_executable(msx_sdl
     ${ROOT}/emu/v9938.c
     ${ROOT}/zip.c
     ${ROOT}/third_party/miniz/miniz.c
+    ${ROOT}/emu/sccplus.c
     ${ROOT}/emu/rtc.c
     ${ROOT}/emu/mappedram.c
     ${ROOT}/emu/wd2793.c
