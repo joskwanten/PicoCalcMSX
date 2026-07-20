@@ -25,7 +25,9 @@
 typedef void (*v9938_irq_func_t)(void);
 
 typedef struct {
-    uint8_t vram[V9938_VRAM_SIZE];
+    // VRAM (128KB) leeft buiten de context: de host levert 'm aan v9938_init
+    // (op de Pico is dit de hergebruikte menu-arena).
+    uint8_t *vram;
 
     // R0-R46 (R24-R31/R47+ bestaan niet; opslag is 64 voor eenvoud).
     uint8_t regs[64];
@@ -37,6 +39,7 @@ typedef struct {
     // voorberekende ARGB-kleur voor de renderers.
     uint16_t palette_raw[16]; // 0b0rrr0bbb00000ggg zoals geschreven (intern)
     uint32_t palette[16];     // ARGB8888
+    uint16_t palette565[16];  // RGB565, voorberekend (Pico-renderpad)
     bool palette_first_pending;
     uint8_t palette_first;    // eerste byte van een 0x9A-paar
 
@@ -65,7 +68,7 @@ typedef struct {
     uint16_t cwx, cwy;                     // voortgang binnen het commando
 } v9938_context_t;
 
-void v9938_init(v9938_context_t *ctx);
+void v9938_init(v9938_context_t *ctx, uint8_t *vram128k);
 void v9938_register_interrupt_func(v9938_context_t *ctx, v9938_irq_func_t f);
 
 // I/O-poorten (MSX: 0x98=data, 0x99=ctrl/status, 0x9A=palette, 0x9B=indirect).
@@ -88,6 +91,10 @@ void v9938_vblank(v9938_context_t *ctx);
 // Render één displaylijn (0..V9938_LINES-1) naar een V9938_LINE_W-brede
 // ARGB-buffer. 256-pixel-modes worden pixel-verdubbeld.
 void v9938_render_line(v9938_context_t *ctx, uint32_t *line, int ln);
+
+// 565-variant voor de Pico: rendert op bronbreedte (retourwaarde 256 of
+// 512, geen pixelverdubbeling) rechtstreeks in RGB565.
+int v9938_render_line_565(v9938_context_t *ctx, uint16_t *dst, int ln);
 
 uint32_t v9938_backdrop_color(v9938_context_t *ctx);
 

@@ -34,16 +34,18 @@ void audio_hdmi_init(void)
     a_head = a_tail = 0;
 }
 
-void audio_hdmi_generate(void)
+void audio_hdmi_generate_burst(uint32_t max_samples)
 {
     // Top the ring up toward half full (~40 ms of slack at 48 kHz). The batch is
-    // bounded so a concurrent drain by core 1 can never make this spin forever.
+    // bounded so a concurrent drain by core 1 can never make this spin forever —
+    // and the caller bounds it verder: synthese draait op core 0, en een lange
+    // burst midden in het zichtbare veld laat de beam-pacing achterlopen
+    // (core 1 rendert dan lijnen uit nog-niet-geëmuleerde VDP-state).
     uint32_t fill = aring_fill();
     const uint32_t target = ARING / 2;
     if (fill >= target) return;
     uint32_t need = target - fill;
-    const uint32_t MAX_BATCH = 1200; // ~1.5 frames at 48 kHz
-    if (need > MAX_BATCH) need = MAX_BATCH;
+    if (need > max_samples) need = max_samples;
 
     while (need) {
         uint32_t chunk = need < IN_CHUNK ? need : IN_CHUNK;
@@ -60,11 +62,21 @@ void audio_hdmi_generate(void)
     }
 }
 
+void audio_hdmi_generate(void)
+{
+    audio_hdmi_generate_burst(1200); // ~1.5 frame bij 48 kHz (vblank/opstart)
+}
+
 void __not_in_flash_func(audio_hdmi_pump)(void)
 {
     static int frame_counter = 0;
 
-    while (hstx_di_queue_get_level() < 200) {
+    // Begrensd per aanroep: de queue in één keer vol encoderen (TERC4) kost
+    // ~100+ µs en verhongert dan de lijnproducer op core 1 -> ring-misses op
+    // een vást punt in het frame. Een paar islands per keer druppelt net zo
+    // hard bij (de taak draait vele malen per scanlijn), zonder burst.
+    int budget = 4;
+    while (hstx_di_queue_get_level() < 200 && budget-- > 0) {
         if (aring_fill() < 4)
             break; // underrun: the library inserts a silence island for us
 

@@ -298,8 +298,9 @@ int main(int argc, char **argv)
            cfg.slot2[0] ? cfg.slot2 : "(empty)", game2_size,
            cfg.diskA[0] ? cfg.diskA : "(empty)");
 
+    static uint8_t vram128k[V9938_VRAM_SIZE];
     bool ok = msx2
-        ? machine_init_msx2(bios, sizeof bios, ext_rom, sizeof ext_rom, game, game_size)
+        ? machine_init_msx2(bios, sizeof bios, ext_rom, sizeof ext_rom, game, game_size, vram128k)
         : machine_init(bios, sizeof bios, game, game_size, game2, game2_size);
     if (!ok) {
         fprintf(stderr, "machine_init failed\n");

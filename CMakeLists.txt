@@ -54,6 +54,8 @@ add_executable(BareMSX
         emu/konami-mega-rom-scc.c
         emu/mapper.c
         emu/v9938.c
+        emu/rtc.c
+        emu/mappedram.c
         emu/wd2793.c
         emu/diskrom.c
         emu/emu2149.c
@@ -84,6 +86,10 @@ target_compile_definitions(BareMSX PRIVATE Z80_STATIC)
 # Een gefaalde malloc moet NULL teruggeven (het ROM-laadpad handelt dat af),
 # niet panicken (SDK-default) — dat gaf een stille lockup bij grote ROMs.
 target_compile_definitions(BareMSX PRIVATE PICO_MALLOC_PANIC=0)
+
+# MSX2-profiel (V9938 + mapper-RAM + RTC); boot als system/ zowel msx2* als
+# msx2ext* bevat. Het V9938-VRAM hergebruikt de 128KB menu-arena.
+target_compile_definitions(BareMSX PRIVATE BAREMSX_MSX2=1)
 
 # Ingebakken fallback-ROMs (emu/bios_rom.h + emu/nemesis2.h; zelf genereren met
 # tools/rom_to_header.py — zitten niet in git). Zonder deze optie bevat de

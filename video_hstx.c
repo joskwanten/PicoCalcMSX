@@ -22,9 +22,9 @@
 // scanlinecallback consumeert. ring_line[i] = welk MSX-lijnnummer er in slot
 // i klaarstaat (-1 = leeg); pas gezet NA het vullen (dmb) zodat de consumer
 // nooit een half gevulde lijn ziet.
-#define RING_N 4
+#define RING_N 8
 static uint16_t ring[RING_N][512];
-static volatile int16_t ring_line[RING_N] = {-1, -1, -1, -1};
+static volatile int16_t ring_line[RING_N] = {-1, -1, -1, -1, -1, -1, -1, -1};
 static volatile uint16_t ring_w[RING_N];
 
 // Diagnose (uitleesbaar via SWD): callback-aanroepen, pipeline-misses,
@@ -83,8 +83,9 @@ static void __not_in_flash_func(scanline_cb)(uint32_t v_scanline, uint32_t activ
     for (; w < OUT_W / 2; w++) dst[w] = bw;
 }
 
-// Producer: render de eerstvolgende lijnen (venster van 3) vooruit op de
-// scanout. Draait als core 1-achtergrondtaak, samen met de audio-pomp.
+// Producer: render de eerstvolgende lijnen (venster van 6, ring van 8:
+// ruimte om core 1-hikjes zoals een audio-encodeerbatch op te vangen) vooruit
+// op de scanout. Draait als core 1-achtergrondtaak, samen met de audio-pomp.
 static void __not_in_flash_func(pipeline_task)(void)
 {
     // Audio eerst: de data-island-queue is latency-kritischer dan de
@@ -101,9 +102,13 @@ static void __not_in_flash_func(pipeline_task)(void)
         int base = (sl < yo) ? -1
                  : (sl >= yo + 2 * n) ? -1
                  : ((sl - yo) >> 1);
-        for (int k = 1; k <= 3; k++) {
-            int L = (base + k) % n;
-            if (L < 0) L += n;
+        for (int k = 1; k <= 6; k++) {
+            // Clampen, niet wrappen: 212 is geen veelvoud van RING_N, dus een
+            // gewrapte lijn 0 zou het slot van een nog-niet-gescande lijn bij
+            // de onderrand overschrijven. Voorbij de onderrand produceert de
+            // vblank-pass (base = -1) het volgende frame al vanaf lijn 0.
+            int L = base + k;
+            if (L >= n) break;
             int slot = L % RING_N;
             if (ring_line[slot] != L) {
                 int w = 256;

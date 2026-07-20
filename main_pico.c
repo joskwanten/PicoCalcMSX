@@ -63,8 +63,11 @@ static inline void enable_fpu(void) {
 
 // --- lijnbronnen voor de video-pipeline (core 1 trekt lijnen op aanvraag) ---
 
-// Menu: klein 565-framebuffer dat core 0 vult; de bron kopieert er lijnen uit.
-static uint16_t menu_fb[MSX_W * MSX_H];
+// VDP-arena (128KB), dubbel gebruikt: vóór de machine start is het eerste
+// 96KB het menu-framebuffer; start het MSX2-profiel, dan wordt de héle arena
+// het V9938-VRAM (machine_init_msx2 wist 'm — het menu is dan klaar).
+static uint8_t vdp_arena[128 * 1024] __attribute__((aligned(4)));
+#define menu_fb ((uint16_t *)vdp_arena)
 static void menu_line_source(uint16_t *dst, int line, int *w)
 {
     memcpy(dst, &menu_fb[line * MSX_W], MSX_W * sizeof(uint16_t));
@@ -126,6 +129,8 @@ int main(void)
 
 #ifdef BAREMSX_SD
     static uint8_t sd_bios[65536];
+    bool boot_msx2 = false;      // beide msx2*-bestanden in system/ aanwezig
+    uint32_t msx2ext_size = 0;   // sub-ROM-grootte (staat op sd_bios+32K)
     static menu_config_t cfg;
     static storage_entry_t ent[64];
     bool sd_ok = storage_init();
@@ -160,30 +165,49 @@ int main(void)
 #ifdef BAREMSX_SD
     static char diskrom_name[STORAGE_MAX_NAME];
     if (sd_ok) {
-        // system/: "disk*" = DISK.ROM, "msx2*" = MSX2-set (hoort bij het
-        // SDL/MSX2-profiel — de Pico draait nog MSX1 en moet die dus
-        // OVERSLAAN: een MSX2-BIOS op de TMS9918 boot naar een zwart
-        // scherm), eerste overige bestand = de MSX1-BIOS.
+        // system/: "disk*" = DISK.ROM, "msx2ext*" = MSX2-sub-ROM, "msx2*" =
+        // MSX2-hoofd-BIOS, eerste overige bestand = de MSX1-BIOS. Zijn de
+        // beide msx2-bestanden aanwezig, dan boot de Pico het MSX2-profiel;
+        // anders MSX1.
         char bios_name[STORAGE_MAX_NAME] = "";
-        bool saw_msx2 = false;
+        char msx2_name[STORAGE_MAX_NAME] = "", msx2ext_name[STORAGE_MAX_NAME] = "";
         int ns = storage_list(SD_SYSTEM, ent, 64);
         for (int i = 0; i < ns; i++) {
             if (ent[i].is_dir) continue;
             if (is_disk_rom_name(ent[i].name)) {
                 if (!diskrom_name[0]) snprintf(diskrom_name, sizeof diskrom_name, "%s", ent[i].name);
+            } else if (strncasecmp(ent[i].name, "msx2ext", 7) == 0) {
+                if (!msx2ext_name[0]) snprintf(msx2ext_name, sizeof msx2ext_name, "%s", ent[i].name);
             } else if (strncasecmp(ent[i].name, "msx2", 4) == 0) {
-                saw_msx2 = true; // genegeerd tot het MSX2-profiel op de Pico landt
+                if (!msx2_name[0]) snprintf(msx2_name, sizeof msx2_name, "%s", ent[i].name);
             } else if (!bios_name[0]) {
                 snprintf(bios_name, sizeof bios_name, "%s", ent[i].name);
             }
         }
-        if (saw_msx2)
-            printf("[boot] msx2*-bestanden in system/ genegeerd (Pico draait MSX1-profiel)\n");
-        if (bios_name[0]) {
+#ifdef BAREMSX_MSX2
+        boot_msx2 = msx2_name[0] && msx2ext_name[0];
+#else
+        if (msx2_name[0])
+            printf("[boot] msx2* genegeerd (build zonder BAREMSX_MSX2)\n");
+#endif
+        if (boot_msx2) {
+            // MSX2-set in sd_bios pakken: hoofd-BIOS (32KB) op [0..32K),
+            // sub-ROM op [32K..48K). Het menu-font komt uit de hoofd-BIOS
+            // (CGTABL wijst gewoon binnen de eerste 32KB).
+            memset(sd_bios, 0xFF, sizeof sd_bios);
+            storage_read(SD_SYSTEM, msx2_name, sd_bios, 32768);
+            long es = storage_read(SD_SYSTEM, msx2ext_name, sd_bios + 32768, 16384);
+            msx2ext_size = es > 0 ? (uint32_t)es : 0;
+            use_bios = sd_bios;
+            use_bios_size = 32768;
+            printf("[boot] MSX2-profiel: %s + %s\n", msx2_name, msx2ext_name);
+        } else if (bios_name[0]) {
             memset(sd_bios, 0xFF, sizeof sd_bios);
             storage_read(SD_SYSTEM, bios_name, sd_bios, sizeof sd_bios);
             use_bios = sd_bios;
             use_bios_size = sizeof sd_bios;
+        }
+        if (use_bios) {
 
             if (staged_game) {
                 // Zojuist gestaged (na de menu-reboot): direct booten, geen menu.
@@ -260,7 +284,10 @@ int main(void)
     }
 
     // Slot 2-cartridge: klein en via RAM (geen flash-staging voor slot 2).
-    if (sd_ok && cfg.slot2[0]) {
+    // (Nog niet bedraad in het MSX2-profiel: daar is slot 2 niet aangesloten.)
+    if (sd_ok && cfg.slot2[0] && boot_msx2)
+        printf("[boot] slot 2 genegeerd (MSX2-profiel heeft nog geen slot 2)\n");
+    if (sd_ok && cfg.slot2[0] && !boot_msx2) {
         long sz2 = storage_size(SD_ROMS, cfg.slot2);
         if (sz2 > 0 && sz2 <= 48 * 1024)
             use_game2 = storage_load(SD_ROMS, cfg.slot2, &use_game2_size);
@@ -270,9 +297,10 @@ int main(void)
         }
     }
 
-    // Disk-interface (subslot 3-3): DISK.ROM uit system/ + gekozen .dsk als drive A.
+    // Disk-interface (subslot 3-3): DISK.ROM uit system/ + gekozen .dsk als
+    // drive A. (MSX1-profiel; in het MSX2-profiel is disk nog niet bedraad.)
     static uint8_t disk_rom[16384];
-    if (sd_ok && diskrom_name[0]) {
+    if (sd_ok && diskrom_name[0] && !boot_msx2) {
         long drs = storage_read(SD_SYSTEM, diskrom_name, disk_rom, sizeof disk_rom);
         if (drs > 0) {
             uint8_t sides = 0;
@@ -303,13 +331,24 @@ int main(void)
         while (true) tight_loop_contents();
     }
 
-    if (!machine_init(use_bios, use_bios_size, use_game, use_game_size,
-                      use_game2, use_game2_size)) {
+    bool init_ok;
+#if defined(BAREMSX_SD) && defined(BAREMSX_MSX2)
+    if (boot_msx2)
+        init_ok = machine_init_msx2(use_bios, use_bios_size,
+                                    sd_bios + 32768, msx2ext_size,
+                                    use_game, use_game_size, vdp_arena);
+    else
+#endif
+        init_ok = machine_init(use_bios, use_bios_size, use_game, use_game_size,
+                               use_game2, use_game2_size);
+    if (!init_ok) {
         while (true) tight_loop_contents();
     }
 
-    // Machine draait: core 1 rendert vanaf nu live uit de VDP-state.
-    video_hstx_set_line_source(machine_line_source, MSX_H);
+    // Machine draait: core 1 rendert vanaf nu live uit de VDP-state
+    // (192 lijnen MSX1, 212 MSX2).
+    const int vis_h = machine_display_height();
+    video_hstx_set_line_source(machine_line_source, vis_h);
 
     if (use_game && use_game_size >= 4096) {
         dbg_xip_ptr = use_game;
@@ -324,14 +363,17 @@ int main(void)
         usbkbd_task(); // USB-host pompen (HID-reports -> MSX-matrix)
 #endif
 
+        uint32_t f_start = video_hstx_frame_count();
+
         // Eén MSX-frame emuleren, beam-paced: elke lijn wordt pas gedraaid
-        // als de HSTX-scanout in de buurt komt (max ~8 lijnen vooruit), zodat
+        // als de HSTX-scanout in de buurt komt (max ~12 lijnen vooruit — de
+        // producer rendert tot 6 vooruit en heeft geëmuleerde state nodig), zodat
         // core 1's live lijnrender altijd actuele-maar-al-geëmuleerde VDP-
         // state ziet. Vblank-lijnen (192+) hoeven niet te wachten.
         video_hstx_set_border(machine_border_565());
         for (int ln = 0; ln < 262; ln++) {
-            if (ln < MSX_H) {
-                while (video_hstx_scan_msx_line() < ln - 8) {
+            if (ln < vis_h) {
+                while (video_hstx_scan_msx_line() < ln - 12) {
                     extern volatile int dbg_pace_ln, dbg_pace_scan;
                     dbg_pace_ln = ln;
                     dbg_pace_scan = video_hstx_scan_msx_line();
@@ -342,10 +384,18 @@ int main(void)
                 }
             }
             machine_do_line(ln);
-            // Audioring 4x per frame bijvullen i.p.v. 1x aan het einde:
-            // kleinere batches, gelijkmatiger aanbod -> geen underruns.
-            if ((ln & 63) == 63)
-                audio_hdmi_generate();
+            // Audioring gelijkmatig bijvullen: in het zichtbare veld elke 16
+            // lijnen een KLEINE burst (max 64 samples) en alléén als core 0
+            // ruim vóór de beam ligt — een burst op het moment dat de
+            // voorsprong minimaal is laat de producer stale lijnen renderen
+            // (zichtbaar als glitches op een vaste schermhoogte). In vblank
+            // de grote top-up.
+            if ((ln & 15) == 15) {
+                if (ln >= vis_h)
+                    audio_hdmi_generate_burst(1200);
+                else if (video_hstx_scan_msx_line() < ln - 9)
+                    audio_hdmi_generate_burst(64);
+            }
         }
 
         audio_hdmi_generate();   // restje van dit frame
@@ -357,16 +407,18 @@ int main(void)
             if (xip_sum(dbg_xip_ptr) != dbg_xip_ref) dbg_xip_bad++;
         }
 
-        // Frame-flank afwachten (de beam-pacing hierboven eindigt vlak na de
-        // onderrand; dit lijnt het volgende frame uit).
-        {
-            uint32_t f = video_hstx_frame_count();
-            while (video_hstx_frame_count() == f) {
+        // Frame-flank afwachten — maar ALLEEN als we nog in het displayframe
+        // zitten waarin we begonnen. De vblank-staart (50 lijnen emulatie +
+        // audio-top-up) valt na de laatste gepacete lijn in ~0,9 ms; loopt
+        // die nét uit, dan zou een onvoorwaardelijke wait een heel frame
+        // overslaan en de emulatie hard op 30 fps klemmen. Bij een gemiste
+        // flank dus meteen door: de per-lijn-pacing hierboven lijnt het
+        // volgende frame vanzelf weer uit.
+        while (video_hstx_frame_count() == f_start) {
 #ifdef BAREMSX_USB_KEYBOARD
-                usbkbd_task();
+            usbkbd_task();
 #endif
-                tight_loop_contents();
-            }
+            tight_loop_contents();
         }
 
         // Eens per seconde: emulatie-fps + display-fps

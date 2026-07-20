@@ -28,20 +28,19 @@ void machine_attach_disk(const uint8_t *disk_rom, uint32_t disk_rom_size,
                          void *io_ctx, wd_sector_io_t io);
 
 // MSX2-profiel (alleen beschikbaar in builds met BAREMSX_MSX2; de Pico kan
-// dit pas na de PSRAM-stap). bios (32KB) en ext (16KB sub-ROM) worden als
-// 64KB-gepadde buffers aangeleverd; ALTERNATIEF voor machine_init.
+// dit kan sinds de lijn-pipeline óók op een kale Pico 2). bios = 32KB main-
+// BIOS, ext = sub-ROM (begrensd op ext_size), vram128k = door de host
+// geleverd 128KB-VRAM (op de Pico: de menu-arena — het menu is dan klaar).
 bool machine_init_msx2(const uint8_t *bios, uint32_t bios_size,
                        const uint8_t *ext, uint32_t ext_size,
-                       const uint8_t *game, uint32_t game_size);
+                       const uint8_t *game, uint32_t game_size,
+                       uint8_t *vram128k);
 bool machine_is_msx2(void);
 int machine_display_width(void);  // 256 (MSX1) of 512 (MSX2)
 int machine_display_height(void); // 192 (MSX1) of 212 (MSX2)
-void machine_render_snapshot_line_wide(uint32_t *line, int y); // MSX2, 512 px
 void machine_do_cycles();
 void machine_generate_interrupt();
 void machine_get_audio(int16_t* chunk, uint32_t len);
-void machine_get_rendered_image_rgba(uint32_t* image);
-void machine_get_rendered_line(uint32_t* line, int y);
 // Beam-gebaseerd renderen ("race the beam", zonder snapshot/framebuffer in
 // de core): registreer een sink en machine_do_cycles levert elke zichtbare
 // displaylijn aan op het moment dat de geëmuleerde beam 'm passeert,
@@ -61,9 +60,6 @@ void machine_do_line(int line);
 int machine_render_line_565(uint16_t *dst, int y);
 uint16_t machine_border_565(void);
 
-void machine_snapshot_vdp(void);                       // core 0: kopieer VDP-state
-void machine_render_snapshot_line(uint32_t* line, int y); // core 1: render uit snapshot
-uint32_t machine_snapshot_background_color(void);
 void machine_keydown(uint32_t index);
 void machine_keyup(uint32_t index);
 uint32_t machine_get_background_color();

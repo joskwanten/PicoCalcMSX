@@ -27,13 +27,24 @@
 //  - BIOS komt uit flash (bios_rom[] in bios_rom.h) i.p.v. van disk
 //  - geen cartridge/SCC en geen audio (komt later)
 
-uint8_t ram[0x10000];   // MSX RAM in SRAM
 Z80 cpu;
 
 slots_context_t slots;
 static subslot_context_t subslots3; // slot 3: RAM op 3-2 (NMS-8245-stijl)
-tms9918_context_t tms9918;
-tms9918_context_t tms9918_snap; // snapshot voor core 1 (blit) — vermijdt VDP-race
+
+// Machine-arena: het MSX1-profiel (64KB RAM + TMS9918) en het MSX2-profiel
+// (128KB mapper-pool) delen dezelfde 128KB — er draait er maar één tegelijk.
+// De namen `ram` en `tms9918` blijven via macro's gewoon werken.
+typedef struct { uint8_t ram[0x10000]; tms9918_context_t vdp; } msx1_state_t;
+static union {
+    msx1_state_t m1;
+#ifdef BAREMSX_MSX2
+    uint8_t mapram[MAPPEDRAM_SIZE];
+#endif
+} machine_arena;
+#define ram     (machine_arena.m1.ram)
+#define tms9918 (machine_arena.m1.vdp)
+
 ppi_context_t ppi;
 konami_scc_t konami_scc;
 mapper_t cart;  // slot 1-cartridge-mapper (plain/konami/ascii8/16)
@@ -49,12 +60,14 @@ static bool disk_attached = false;
 // 2x128KB V9938-context + 128KB mapper-pool pas aan als PSRAM er is).
 static bool g_msx2 = false;
 bool machine_is_msx2(void) { return g_msx2; }
+int machine_display_width(void)  { return g_msx2 ? 512 : 256; }
+int machine_display_height(void) { return g_msx2 ? 212 : 192; }
 #ifdef BAREMSX_MSX2
+// De V9938-context is klein geworden (VRAM zit achter een pointer): de
+// host levert het 128KB-VRAM (op de Pico: de menu-arena, zie main_pico).
 v9938_context_t v9938;
-v9938_context_t v9938_snap; // snapshot voor de renderlus (zoals tms9918_snap)
 static rtc_t rtc;
 static mappedram_t mapram;
-static uint8_t mapram_pool[MAPPEDRAM_SIZE];
 #endif
 
 void machine_attach_disk(const uint8_t *disk_rom, uint32_t disk_rom_size,
@@ -352,11 +365,8 @@ int __not_in_flash_func(machine_render_line_565)(uint16_t *dst, int y)
 {
     static uint32_t tmp[512]; // alleen core 1 gebruikt dit
 #ifdef BAREMSX_MSX2
-    if (g_msx2) {
-        v9938_render_line(&v9938, tmp, y);
-        for (int i = 0; i < 512; i++) dst[i] = m_argb565(tmp[i]);
-        return 512;
-    }
+    if (g_msx2)
+        return v9938_render_line_565(&v9938, dst, y); // 256-modes: HSTX verdubbelt
 #endif
     tms9918_render_line(&tms9918, tmp, y);
     for (int i = 0; i < 256; i++) dst[i] = m_argb565(tmp[i]);
@@ -376,18 +386,32 @@ uint16_t machine_border_565(void)
 //   Slot 3:  expanded — 3-0 sub-ROM (EXT), 3-2 mapper-RAM (128KB, FC-FF)
 // bios/ext worden door de frontend als 64KB-gepadde buffers aangeleverd
 // (rom_read is bewust simpel en maskeert alleen op 16-bit).
+// Begrensd ROM-window (voor de sub-ROM: 16KB op 0x0000 in zijn subslot;
+// reads erbuiten zijn open bus).
+typedef struct { const uint8_t *d; uint32_t n; } romwin_t;
+static romwin_t ext_win;
+static uint8_t romwin_read(void *ctx, uint16_t a)
+{
+    romwin_t *w = (romwin_t *)ctx;
+    return a < w->n ? w->d[a] : 0xFF;
+}
+static void romwin_write(void *ctx, uint16_t a, uint8_t v) { (void)ctx; (void)a; (void)v; }
+
 bool machine_init_msx2(const uint8_t *bios, uint32_t bios_size,
                        const uint8_t *ext, uint32_t ext_size,
-                       const uint8_t *game, uint32_t game_size)
+                       const uint8_t *game, uint32_t game_size,
+                       uint8_t *vram128k)
 {
-    (void)bios_size; (void)ext_size;
+    (void)bios_size;
     g_msx2 = true;
 
-    v9938_init(&v9938);
+    v9938_init(&v9938, vram128k);
     v9938_register_interrupt_func(&v9938, gen_interrupt);
     rtc_init(&rtc);
-    mappedram_init(&mapram, mapram_pool);
+    mappedram_init(&mapram, machine_arena.mapram);
     scc_init(&konami_scc);
+    ext_win.d = ext;
+    ext_win.n = ext_size;
 
     slots_add_slot(&slots, 0, (void *)bios, rom_read, rom_write);
 
@@ -405,7 +429,7 @@ bool machine_init_msx2(const uint8_t *bios, uint32_t bios_size,
     slots_add_slot(&slots, 2, NULL, empty_read, empty_write);
 
     subslots3.subslot_register = 0;
-    subslots_add_subslot(&subslots3, 0, (void *)ext, rom_read, rom_write); // sub-ROM
+    subslots_add_subslot(&subslots3, 0, &ext_win, romwin_read, romwin_write); // sub-ROM (begrensd)
     subslots_add_subslot(&subslots3, 1, NULL, empty_read, empty_write);
     subslots_add_subslot(&subslots3, 2, &mapram, mappedram_read, mappedram_write);
     subslots_add_subslot(&subslots3, 3, NULL, empty_read, empty_write);
@@ -474,51 +498,6 @@ void machine_generate_interrupt(void)
     check_and_generate_interrupt(&tms9918);
 }
 
-void machine_get_rendered_image_rgba(uint32_t *image)
-{
-    tms9918_render_rgba(&tms9918, image);
-}
-
-void machine_get_rendered_line(uint32_t *line, int y)
-{
-    tms9918_render_line(&tms9918, line, y);
-}
-
-// --- VDP snapshot voor de blit op core 1 ---
-// Core 0 kopieert de live VDP-state; core 1 rendert uit de snapshot.
-void machine_snapshot_vdp(void)
-{
-#ifdef BAREMSX_MSX2
-    if (g_msx2) return; // snapshot is al op de vblank-flank genomen (zie do_cycles)
-#endif
-    memcpy(&tms9918_snap, &tms9918, sizeof(tms9918_context_t));
-}
-
-void __not_in_flash_func(machine_render_snapshot_line)(uint32_t *line, int y)
-{
-    tms9918_render_line(&tms9918_snap, line, y);
-}
-
-// MSX2: displaygeometrie + 512-brede lijnrender uit de snapshot.
-// (Literals i.p.v. V9938_LINE_W/V9938_LINES: v9938.h bestaat niet in
-// MSX1-only builds en g_msx2 is daar altijd false.)
-int machine_display_width(void)  { return g_msx2 ? 512 : 256; }
-int machine_display_height(void) { return g_msx2 ? 212 : 192; }
-
-#ifdef BAREMSX_MSX2
-void machine_render_snapshot_line_wide(uint32_t *line, int y)
-{
-    v9938_render_line(&v9938_snap, line, y);
-}
-#endif
-
-uint32_t machine_snapshot_background_color(void)
-{
-#ifdef BAREMSX_MSX2
-    if (g_msx2) return v9938_backdrop_color(&v9938_snap);
-#endif
-    return tms9918_get_backdrop_color(&tms9918_snap);
-}
 
 uint32_t machine_get_background_color(void)
 {

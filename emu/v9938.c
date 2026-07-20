@@ -59,7 +59,13 @@ static void set_palette(v9938_context_t *ctx, int idx, uint32_t r3, uint32_t g3,
 {
     ctx->palette_raw[idx] = (uint16_t)((r3 << 4) | b3 | (g3 << 8));
     ctx->palette[idx] = 0xFF000000u | (c3to8(r3) << 16) | (c3to8(g3) << 8) | c3to8(b3);
+    // RGB565 voorberekend voor het Pico-renderpad (3 bits -> 5/6, gespreid).
+    uint32_t r5 = (r3 << 2) | (r3 >> 1), g6 = (g3 << 3) | g3, b5 = (b3 << 2) | (b3 >> 1);
+    ctx->palette565[idx] = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
 }
+
+// G7 (screen 8): GGGRRRBB-byte -> RGB565, voorberekend (gevuld in init).
+static uint16_t g7_565[256];
 
 // Power-on-palette (§7, tabel "initial palette") — de TMS9918-lookalike.
 static const uint8_t default_palette[16][3] = {
@@ -68,11 +74,19 @@ static const uint8_t default_palette[16][3] = {
     {1, 4, 1}, {6, 2, 5}, {5, 5, 5}, {7, 7, 7},
 };
 
-void v9938_init(v9938_context_t *ctx)
+void v9938_init(v9938_context_t *ctx, uint8_t *vram128k)
 {
     memset(ctx, 0, sizeof *ctx);
+    ctx->vram = vram128k;
+    memset(vram128k, 0, V9938_VRAM_SIZE);
     for (int i = 0; i < 16; i++)
         set_palette(ctx, i, default_palette[i][0], default_palette[i][1], default_palette[i][2]);
+    for (int b = 0; b < 256; b++) {
+        uint32_t g3 = (b >> 5) & 7, r3 = (b >> 2) & 7, b2 = b & 3;
+        uint32_t r5 = (r3 << 2) | (r3 >> 1), g6 = (g3 << 3) | g3;
+        uint32_t b5 = (b2 << 3) | (b2 << 1) | (b2 >> 1);
+        g7_565[b] = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+    }
     ctx->status[2] = S2_TR; // transfer altijd "ready" zolang de engine synchroon is
 }
 
@@ -103,7 +117,7 @@ static void cmd_start(v9938_context_t *ctx, uint8_t v);
 static void cmd_cpu_step(v9938_context_t *ctx, uint8_t data);
 
 // Registerschrijfactie met bijwerkingen.
-static void reg_write(v9938_context_t *ctx, int n, uint8_t v)
+static void __not_in_flash_func(reg_write)(v9938_context_t *ctx, int n, uint8_t v)
 {
     n &= 0x3F;
     uint8_t old = ctx->regs[n];
@@ -252,7 +266,7 @@ static inline uint32_t cmd_addr(const cmd_layout_t *L, uint32_t x, uint32_t y)
     return (y * L->pitch + x / L->ppb) & 0x1FFFF;
 }
 
-static uint8_t vdp_point(v9938_context_t *ctx, uint32_t x, uint32_t y)
+static uint8_t __not_in_flash_func(vdp_point)(v9938_context_t *ctx, uint32_t x, uint32_t y)
 {
     cmd_layout_t L = cmd_layout(ctx);
     uint8_t b = ctx->vram[cmd_addr(&L, x, y)];
@@ -265,7 +279,7 @@ static uint8_t vdp_point(v9938_context_t *ctx, uint32_t x, uint32_t y)
 
 // Pixel-write met logische operatie (lage nibble van R46). T-varianten
 // (bit 3) slaan transparant over als de bronkleur 0 is.
-static void vdp_pset(v9938_context_t *ctx, uint32_t x, uint32_t y, uint8_t color, uint8_t lo)
+static void __not_in_flash_func(vdp_pset)(v9938_context_t *ctx, uint32_t x, uint32_t y, uint8_t color, uint8_t lo)
 {
     if ((lo & 0x08) && color == 0) return;
     cmd_layout_t L = cmd_layout(ctx);
@@ -293,7 +307,7 @@ static void vdp_pset(v9938_context_t *ctx, uint32_t x, uint32_t y, uint8_t color
 // regel geldt alleen voor BLOK-commando's; bij LINE zijn NX/NY de major/
 // minor-lengtes en betekent 0 gewoon 0 (het Philips-bootlogo tekent zijn
 // horizontale lijnen met NY=0 — met de blok-default werd dat een diagonaal).
-static void cmd_latch(v9938_context_t *ctx)
+static void __not_in_flash_func(cmd_latch)(v9938_context_t *ctx)
 {
     ctx->csx = (uint16_t)(ctx->regs[32] | ((ctx->regs[33] & 1) << 8));
     ctx->csy = (uint16_t)(ctx->regs[34] | ((ctx->regs[35] & 3) << 8));
@@ -310,7 +324,7 @@ static void cmd_latch(v9938_context_t *ctx)
 static inline uint16_t blk_nx(const v9938_context_t *ctx) { return ctx->cnx ? ctx->cnx : 512; }
 static inline uint16_t blk_ny(const v9938_context_t *ctx) { return ctx->cny ? ctx->cny : 1024; }
 
-static void cmd_done(v9938_context_t *ctx)
+static void __not_in_flash_func(cmd_done)(v9938_context_t *ctx)
 {
     ctx->cm = 0;
     ctx->status[2] = (uint8_t)((ctx->status[2] & ~S2_CE) | S2_TR);
@@ -323,7 +337,7 @@ static void cmd_done(v9938_context_t *ctx)
 
 // VRAM-vullingen/kopieën. Byte-commando's (H*) werken per byte, de
 // pixelcommando's (L*) per pixel met logische op.
-static void cmd_run_vram(v9938_context_t *ctx, uint8_t cm)
+static void __not_in_flash_func(cmd_run_vram)(v9938_context_t *ctx, uint8_t cm)
 {
     cmd_layout_t L = cmd_layout(ctx);
     uint8_t clr = ctx->regs[44];
@@ -430,7 +444,7 @@ static void cmd_run_vram(v9938_context_t *ctx, uint8_t cm)
 }
 
 // R46-write: commando starten.
-static void cmd_start(v9938_context_t *ctx, uint8_t v)
+static void __not_in_flash_func(cmd_start)(v9938_context_t *ctx, uint8_t v)
 {
     uint8_t cm = v >> 4;
     ctx->clo = v & 0x0F;
@@ -464,7 +478,7 @@ static void cmd_start(v9938_context_t *ctx, uint8_t v)
 }
 
 // Eén stap van een lopende CPU-transfer (R44-write of S7-read).
-static void cmd_cpu_step(v9938_context_t *ctx, uint8_t data)
+static void __not_in_flash_func(cmd_cpu_step)(v9938_context_t *ctx, uint8_t data)
 {
     cmd_layout_t L = cmd_layout(ctx);
     uint32_t x, y;
@@ -514,7 +528,7 @@ static void cmd_cpu_step(v9938_context_t *ctx, uint8_t data)
 //    bepaalt alleen de INT-lijn); software pollt FH ook met IRQs uit.
 //  - VR is hoog in de verticale blanking (lijn >= actieve hoogte).
 //  - Op de eerste vblank-lijn: S0.F + frame-IRQ (IE0).
-void v9938_scanline(v9938_context_t *ctx, int line)
+void __not_in_flash_func(v9938_scanline)(v9938_context_t *ctx, int line)
 {
     int active_h = (ctx->regs[9] & 0x80) ? 212 : 192;
 
@@ -582,17 +596,20 @@ static inline uint32_t sprite_pat_table(const v9938_context_t *ctx)
     return ((uint32_t)ctx->regs[6] & 0x3F) << 11;
 }
 
-// ---- lijnrenderers (legacy modes; bitmap-modes volgen in fase 2) ----
-// Interne 256-brede buffer; v9938_render_line verdubbelt naar 512.
+// ---- lijnrenderers ----
+// Alle modes renderen palet-INDICES (uint8; G7: het ruwe GGGRRRBB-byte) in
+// een 256/512-brede buffer; de uitvoerpassen zetten die in één keer om naar
+// ARGB (SDL) of RGB565 (Pico). Zo blijft het hete pad één lookup per pixel —
+// nodig om op de Pico binnen het beam-budget (~63 µs/lijn) te blijven.
 
-static void render_t1(v9938_context_t *ctx, uint32_t *px, int ln)
+static void __not_in_flash_func(render_t1)(v9938_context_t *ctx, uint8_t *px, int ln)
 {
     uint32_t PG = pattern_table(ctx), PN = name_table(ctx);
-    uint32_t bg = ctx->palette[BACKDROP_IDX(ctx)];
-    uint32_t t = (ctx->regs[7] >> 4) & 0x0F;
-    uint32_t fg = t ? ctx->palette[t] : bg;
+    uint8_t bg = (uint8_t)BACKDROP_IDX(ctx);
+    uint8_t t = (ctx->regs[7] >> 4) & 0x0F;
+    uint8_t fg = t ? t : bg;
     int y = ln >> 3, i = ln & 7;
-    for (int k = 0; k < 256; k++) px[k] = bg;
+    memset(px, bg, 256);
     if (y >= 24) return;
     for (int x = 0; x < 40; x++) {
         uint32_t c = ctx->vram[PN + (uint32_t)(y * 40) + x];
@@ -602,23 +619,23 @@ static void render_t1(v9938_context_t *ctx, uint32_t *px, int ln)
     }
 }
 
-static void render_g1(v9938_context_t *ctx, uint32_t *px, int ln)
+static void __not_in_flash_func(render_g1)(v9938_context_t *ctx, uint8_t *px, int ln)
 {
     uint32_t PG = pattern_table(ctx), PN = name_table(ctx), CT = color_table(ctx);
-    uint32_t bdc = ctx->palette[BACKDROP_IDX(ctx)];
+    uint8_t bdc = (uint8_t)BACKDROP_IDX(ctx);
     int y = ln >> 3, i = ln & 7;
     for (int x = 0; x < 32; x++) {
         uint32_t c = ctx->vram[PN + (uint32_t)(y * 32) + x];
         uint32_t col = ctx->vram[CT + (c >> 3)];
-        uint32_t fg = (col >> 4) ? ctx->palette[col >> 4] : bdc;
-        uint32_t bg = (col & 0xF) ? ctx->palette[col & 0xF] : bdc;
+        uint8_t fg = (col >> 4) ? (uint8_t)(col >> 4) : bdc;
+        uint8_t bg = (col & 0xF) ? (uint8_t)(col & 0xF) : bdc;
         uint32_t p = ctx->vram[PG + 8 * c + i];
         for (int j = 0; j < 8; j++)
             px[x * 8 + j] = (p & (0x80 >> j)) ? fg : bg;
     }
 }
 
-static void render_g2(v9938_context_t *ctx, uint32_t *px, int ln)
+static void __not_in_flash_func(render_g2)(v9938_context_t *ctx, uint8_t *px, int ln)
 {
     // G2/G3-layout: naam + derde<<8, met AND-maskers uit R3/R4 (zoals de
     // TMS9918-screen-2, maar met de bredere V9938-basisregisters).
@@ -627,14 +644,14 @@ static void render_g2(v9938_context_t *ctx, uint32_t *px, int ln)
     uint32_t PN = name_table(ctx);
     uint32_t colourMask = (((uint32_t)ctx->regs[3] & 0x7F) << 3) | 7;
     uint32_t patternMask = (((uint32_t)ctx->regs[4] & 3) << 8) | 0xFF;
-    uint32_t bdc = ctx->palette[BACKDROP_IDX(ctx)];
+    uint8_t bdc = (uint8_t)BACKDROP_IDX(ctx);
     int third = ln >> 6, row = ln & 7, y = ln >> 3;
     for (int x = 0; x < 32; x++) {
         uint32_t charcode = ctx->vram[PN + (uint32_t)(y * 32) + x] + ((uint32_t)third << 8);
         uint32_t p = ctx->vram[PG + ((charcode & patternMask) << 3) + row];
         uint32_t col = ctx->vram[CT + ((charcode & colourMask) << 3) + row];
-        uint32_t fg = (col >> 4) ? ctx->palette[col >> 4] : bdc;
-        uint32_t bg = (col & 0xF) ? ctx->palette[col & 0xF] : bdc;
+        uint8_t fg = (col >> 4) ? (uint8_t)(col >> 4) : bdc;
+        uint8_t bg = (col & 0xF) ? (uint8_t)(col & 0xF) : bdc;
         for (int j = 0; j < 8; j++)
             px[x * 8 + j] = (p & (0x80 >> j)) ? fg : bg;
     }
@@ -647,7 +664,7 @@ static inline int sprite_y_to_line(uint8_t yraw)
     return (yraw > 238) ? ((int)yraw - 255) : ((int)yraw + 1);
 }
 
-static void render_sprites_m1(v9938_context_t *ctx, uint32_t *px, int ln)
+static void __not_in_flash_func(render_sprites_m1)(v9938_context_t *ctx, uint8_t *px, int ln)
 {
     if (ctx->regs[8] & 0x02) return; // SPD: sprites uit (V9938, R8 bit 1)
     uint32_t SA = sprite_attr_table(ctx), SG = sprite_pat_table(ctx);
@@ -667,7 +684,7 @@ static void render_sprites_m1(v9938_context_t *ctx, uint32_t *px, int ln)
         int xx = ctx->vram[SA + 4 * (uint32_t)s + 1];
         uint8_t p = ctx->vram[SA + 4 * (uint32_t)s + 2];
         uint8_t attr = ctx->vram[SA + 4 * (uint32_t)s + 3];
-        uint32_t c = attr & 0x0F;
+        uint8_t c = attr & 0x0F;
         if (attr & 0x80) xx -= 32;
         if (c == 0) continue;
         int r = ln - sprite_y_to_line(yraw);
@@ -683,82 +700,80 @@ static void render_sprites_m1(v9938_context_t *ctx, uint32_t *px, int ln)
             int col = mag ? (j >> 1) : j;
             if (!(bits & (0x8000 >> col))) continue;
             int xp = xx + j;
-            if (xp >= 0 && xp < 256) px[xp] = ctx->palette[c];
+            if (xp >= 0 && xp < 256) px[xp] = c;
         }
     }
 }
 
 // ---- bitmap-modes (G4-G7, §6) ----
 // Kleur 0 toont de backdrop tenzij TP (R8 bit 5) gezet is; verticale scroll
-// (R23) verschuift de bitmap-bron per lijn.
-
-static inline uint32_t bmp_color(v9938_context_t *ctx, uint32_t idx)
+// (R23) verschuift de bitmap-bron per lijn. tp0 = het effectieve indexalias
+// voor kleur 0.
+static inline uint8_t tp0_idx(const v9938_context_t *ctx)
 {
-    if (idx == 0 && !(ctx->regs[8] & 0x20))
-        return ctx->palette[BACKDROP_IDX(ctx)];
-    return ctx->palette[idx];
+    return (ctx->regs[8] & 0x20) ? 0 : (uint8_t)BACKDROP_IDX(ctx);
 }
 
-static void render_g4(v9938_context_t *ctx, uint32_t *px, int ln) // scr5: 256px 4bpp
+static void __not_in_flash_func(render_g4)(v9938_context_t *ctx, uint8_t *px, int ln) // scr5: 256px 4bpp
 {
     uint32_t base = (((uint32_t)ctx->regs[2] >> 5) & 3) << 15;
     uint32_t y = ((uint32_t)ln + ctx->regs[23]) & 0xFF;
     const uint8_t *row = &ctx->vram[base + y * 128];
+    uint8_t tp0 = tp0_idx(ctx);
     for (int x = 0; x < 256; x += 2) {
         uint8_t b = row[x >> 1];
-        px[x] = bmp_color(ctx, b >> 4);
-        px[x + 1] = bmp_color(ctx, b & 0x0F);
+        uint8_t hi = b >> 4, lo = b & 0x0F;
+        px[x] = hi ? hi : tp0;
+        px[x + 1] = lo ? lo : tp0;
     }
 }
 
-static void render_g5(v9938_context_t *ctx, uint32_t *px512, int ln) // scr6: 512px 2bpp
+static void __not_in_flash_func(render_g5)(v9938_context_t *ctx, uint8_t *px512, int ln) // scr6: 512px 2bpp
 {
     uint32_t base = (((uint32_t)ctx->regs[2] >> 5) & 3) << 15;
     uint32_t y = ((uint32_t)ln + ctx->regs[23]) & 0xFF;
     const uint8_t *row = &ctx->vram[base + y * 128];
+    uint8_t tp0 = tp0_idx(ctx);
     for (int x = 0; x < 512; x += 4) {
         uint8_t b = row[x >> 2];
-        px512[x] = bmp_color(ctx, (b >> 6) & 3);
-        px512[x + 1] = bmp_color(ctx, (b >> 4) & 3);
-        px512[x + 2] = bmp_color(ctx, (b >> 2) & 3);
-        px512[x + 3] = bmp_color(ctx, b & 3);
+        uint8_t c0 = (b >> 6) & 3, c1 = (b >> 4) & 3, c2 = (b >> 2) & 3, c3 = b & 3;
+        px512[x] = c0 ? c0 : tp0;
+        px512[x + 1] = c1 ? c1 : tp0;
+        px512[x + 2] = c2 ? c2 : tp0;
+        px512[x + 3] = c3 ? c3 : tp0;
     }
 }
 
-static void render_g6(v9938_context_t *ctx, uint32_t *px512, int ln) // scr7: 512px 4bpp
+static void __not_in_flash_func(render_g6)(v9938_context_t *ctx, uint8_t *px512, int ln) // scr7: 512px 4bpp
 {
     uint32_t base = (((uint32_t)ctx->regs[2] >> 5) & 1) << 16;
     uint32_t y = ((uint32_t)ln + ctx->regs[23]) & 0xFF;
     const uint8_t *row = &ctx->vram[base + y * 256];
+    uint8_t tp0 = tp0_idx(ctx);
     for (int x = 0; x < 512; x += 2) {
         uint8_t b = row[x >> 1];
-        px512[x] = bmp_color(ctx, b >> 4);
-        px512[x + 1] = bmp_color(ctx, b & 0x0F);
+        uint8_t hi = b >> 4, lo = b & 0x0F;
+        px512[x] = hi ? hi : tp0;
+        px512[x + 1] = lo ? lo : tp0;
     }
 }
 
-static void render_g7(v9938_context_t *ctx, uint32_t *px, int ln) // scr8: 256px GGGRRRBB
+static void __not_in_flash_func(render_g7)(v9938_context_t *ctx, uint8_t *px, int ln) // scr8: ruwe GGGRRRBB-bytes
 {
     uint32_t base = (((uint32_t)ctx->regs[2] >> 5) & 1) << 16;
     uint32_t y = ((uint32_t)ln + ctx->regs[23]) & 0xFF;
-    const uint8_t *row = &ctx->vram[base + y * 256];
-    for (int x = 0; x < 256; x++) {
-        uint8_t b = row[x];
-        uint32_t g = (b >> 5) & 7, r = (b >> 2) & 7, bl = b & 3;
-        px[x] = 0xFF000000u | (c3to8(r) << 16) | (c3to8(g) << 8)
-              | (((bl << 6) | (bl << 4) | (bl << 2) | bl) & 0xFF);
-    }
+    memcpy(px, &ctx->vram[base + y * 256], 256);
 }
 
-static void render_t2(v9938_context_t *ctx, uint32_t *px512, int ln) // 80-koloms tekst
+static void __not_in_flash_func(render_t2)(v9938_context_t *ctx, uint8_t *px512, int ln) // 80-koloms tekst
 {
     uint32_t PG = pattern_table(ctx);
     uint32_t PN = ((uint32_t)ctx->regs[2] & 0x7C) << 10;
-    uint32_t bg = ctx->palette[BACKDROP_IDX(ctx)];
-    uint32_t t = (ctx->regs[7] >> 4) & 0x0F;
-    uint32_t fg = t ? ctx->palette[t] : bg;
+    uint8_t bg = (uint8_t)BACKDROP_IDX(ctx);
+    uint8_t t = (ctx->regs[7] >> 4) & 0x0F;
+    uint8_t fg = t ? t : bg;
     int y = ln >> 3, i = ln & 7;
-    for (int k = 0; k < 512; k++) px512[k] = bg;
+    memset(px512, bg, 512);
     if (y >= 24) return; // (26.5-regelmodus + blink: later)
     for (int x = 0; x < 80; x++) {
         uint32_t c = ctx->vram[PN + (uint32_t)(y * 80) + x];
@@ -772,7 +787,7 @@ static void render_t2(v9938_context_t *ctx, uint32_t *px512, int ln) // 80-kolom
 // kleurtabel (SAT-512), EC per lijn, CC-keten (OR-combinatie met de
 // eerstvolgende lagere sprite), sentinel Y=0xD8, scrollt mee met R23.
 // Levert palette-indices in een 256-brede overlay (0xFF = geen sprite).
-static void render_sprites_m2(v9938_context_t *ctx, uint8_t *ovr, int ln)
+static void __not_in_flash_func(render_sprites_m2)(v9938_context_t *ctx, uint8_t *ovr, int ln)
 {
     memset(ovr, 0xFF, 256);
     if (ctx->regs[8] & 0x02) return; // SPD
@@ -845,69 +860,104 @@ static void render_sprites_m2(v9938_context_t *ctx, uint8_t *ovr, int ln)
     }
 }
 
-void __not_in_flash_func(v9938_render_line)(v9938_context_t *ctx, uint32_t *line, int ln)
+// Gemeenschappelijke kern: render de lijn als palet-indices (of ruwe
+// G7-bytes, *g7 = true). Retourneert de bronbreedte: 256 of 512.
+static int __not_in_flash_func(render_line_idx)(v9938_context_t *ctx, uint8_t *buf, int ln, bool *g7)
 {
-    uint32_t bdc = ctx->palette[BACKDROP_IDX(ctx)];
-    // Actieve hoogte: 192 (LN=0) of 212 (R9 bit 7).
+    *g7 = false;
     int active_h = (ctx->regs[9] & 0x80) ? 212 : 192;
-
-    uint32_t px[256];
-    uint8_t ovr[256];
     int mode = v_mode(ctx);
-    bool wide = (mode == 0x10 || mode == 0x14 || mode == 0x09);
+    uint8_t ovr[256];
 
     if (ln >= active_h || BLANKED(ctx)) {
-        for (int k = 0; k < V9938_LINE_W; k++) line[k] = bdc;
-        return;
-    }
-
-    if (wide) {
-        // 512-brede modes: direct in de uitvoerbuffer.
-        switch (mode) {
-        case 0x10: render_g5(ctx, line, ln); break;
-        case 0x14: render_g6(ctx, line, ln); break;
-        case 0x09: render_t2(ctx, line, ln); return; // tekst: geen sprites
-        }
-        render_sprites_m2(ctx, ovr, ln);
-        for (int k = 0; k < 256; k++) {
-            if (ovr[k] != 0xFF) {
-                line[2 * k] = ctx->palette[ovr[k]];
-                line[2 * k + 1] = ctx->palette[ovr[k]];
-            }
-        }
-        return;
+        memset(buf, BACKDROP_IDX(ctx), 256);
+        return 256;
     }
 
     switch (mode) {
-    case 0x01: render_t1(ctx, px, ln); break;
-    case 0x00: render_g1(ctx, px, ln); render_sprites_m1(ctx, px, ln); break;
-    case 0x04: render_g2(ctx, px, ln); render_sprites_m1(ctx, px, ln); break;
-    case 0x08: // G3 (screen 4): G2-layout met sprite mode 2
-        render_g2(ctx, px, ln);
+    case 0x01: render_t1(ctx, buf, ln); return 256; // tekst: geen sprites
+    case 0x00: render_g1(ctx, buf, ln); render_sprites_m1(ctx, buf, ln); return 256;
+    case 0x04: render_g2(ctx, buf, ln); render_sprites_m1(ctx, buf, ln); return 256;
+
+    case 0x10: // G5 (scr6) en G6 (scr7): 512px met sprite mode 2 (2x breed)
+    case 0x14:
+        if (mode == 0x10) render_g5(ctx, buf, ln);
+        else              render_g6(ctx, buf, ln);
         render_sprites_m2(ctx, ovr, ln);
         for (int k = 0; k < 256; k++)
-            if (ovr[k] != 0xFF) px[k] = ctx->palette[ovr[k]];
+            if (ovr[k] != 0xFF) { buf[2 * k] = ovr[k]; buf[2 * k + 1] = ovr[k]; }
+        return 512;
+    case 0x09: render_t2(ctx, buf, ln); return 512; // 80-koloms: geen sprites
+
+    case 0x08: // G3 (scr4): G2-layout met sprite mode 2
+        render_g2(ctx, buf, ln);
         break;
-    case 0x0C: // G4 (screen 5)
-        render_g4(ctx, px, ln);
-        render_sprites_m2(ctx, ovr, ln);
-        for (int k = 0; k < 256; k++)
-            if (ovr[k] != 0xFF) px[k] = ctx->palette[ovr[k]];
+    case 0x0C: // G4 (scr5)
+        render_g4(ctx, buf, ln);
         break;
-    case 0x1C: // G7 (screen 8) — sprites: TODO vaste G7-spritekleuren
-        render_g7(ctx, px, ln);
-        render_sprites_m2(ctx, ovr, ln);
-        for (int k = 0; k < 256; k++)
-            if (ovr[k] != 0xFF) px[k] = ctx->palette[ovr[k]];
+    case 0x1C: // G7 (scr8)
+        render_g7(ctx, buf, ln);
+        *g7 = true;
         break;
     default:
         // MC (multicolor) en restmodes: backdrop.
-        for (int k = 0; k < 256; k++) px[k] = bdc;
-        break;
+        memset(buf, BACKDROP_IDX(ctx), 256);
+        return 256;
     }
 
-    for (int k = 0; k < 256; k++) {
-        line[2 * k] = px[k];
-        line[2 * k + 1] = px[k];
+    render_sprites_m2(ctx, ovr, ln);
+    if (*g7) {
+        // G7-sprites: paletkleur -> dichtstbijzijnd GGGRRRBB-byte, zodat de
+        // buffer uniform blijft. (Echte G7-sprites gebruiken een vast
+        // hardware-sprite-palet — TODO, benadering.)
+        uint8_t spr[16];
+        for (int c = 0; c < 16; c++) {
+            uint16_t raw = ctx->palette_raw[c]; // 0b0rrr0bbb00000ggg
+            spr[c] = (uint8_t)((((raw >> 8) & 7) << 5) | (((raw >> 4) & 7) << 2) | ((raw & 7) >> 1));
+        }
+        for (int k = 0; k < 256; k++)
+            if (ovr[k] != 0xFF) buf[k] = spr[ovr[k]];
+    } else {
+        for (int k = 0; k < 256; k++)
+            if (ovr[k] != 0xFF) buf[k] = ovr[k];
     }
+    return 256;
+}
+
+// SDL/ARGB-pad: altijd 512 breed (256-modes pixelverdubbeld).
+void __not_in_flash_func(v9938_render_line)(v9938_context_t *ctx, uint32_t *line, int ln)
+{
+    uint8_t buf[512];
+    bool g7;
+    int w = render_line_idx(ctx, buf, ln, &g7);
+    if (g7) {
+        for (int k = 0; k < 256; k++) {
+            uint8_t b = buf[k];
+            uint32_t g = (b >> 5) & 7, r = (b >> 2) & 7, bl = b & 3;
+            uint32_t c = 0xFF000000u | (c3to8(r) << 16) | (c3to8(g) << 8)
+                       | ((bl << 6) | (bl << 4) | (bl << 2) | bl);
+            line[2 * k] = line[2 * k + 1] = c;
+        }
+    } else if (w == 512) {
+        for (int k = 0; k < 512; k++) line[k] = ctx->palette[buf[k]];
+    } else {
+        for (int k = 0; k < 256; k++)
+            line[2 * k] = line[2 * k + 1] = ctx->palette[buf[k]];
+    }
+}
+
+// Pico/565-pad: retourneert de bronbreedte (256 of 512); de HSTX-scanout
+// verdubbelt 256-brede lijnen zelf. Dit is het hete beam-pad.
+int __not_in_flash_func(v9938_render_line_565)(v9938_context_t *ctx, uint16_t *dst, int ln)
+{
+    uint8_t buf[512];
+    bool g7;
+    int w = render_line_idx(ctx, buf, ln, &g7);
+    if (g7) {
+        for (int k = 0; k < 256; k++) dst[k] = g7_565[buf[k]];
+        return 256;
+    }
+    const uint16_t *pal = ctx->palette565;
+    for (int k = 0; k < w; k++) dst[k] = pal[buf[k]];
+    return w;
 }

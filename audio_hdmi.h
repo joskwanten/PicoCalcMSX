@@ -11,7 +11,11 @@
 // so audio keeps flowing even while core 0 emulates a frame.
 
 void audio_hdmi_init(void);      // reset resampler/ring state
-void audio_hdmi_generate(void);  // core 0: top up the ring from the emulator
+#include <stdint.h>
+
+void audio_hdmi_generate(void);
+// Begrensde variant voor in het zichtbare veld: vult hooguit max_samples bij.
+void audio_hdmi_generate_burst(uint32_t max_samples);  // core 0: top up the ring from the emulator
 void audio_hdmi_pump(void);      // core 1: drain the ring into the DI queue
 
 #endif // AUDIO_HDMI_H
