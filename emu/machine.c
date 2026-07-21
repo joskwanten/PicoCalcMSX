@@ -343,6 +343,11 @@ bool machine_init(const uint8_t *bios, uint32_t bios_size,
 // Eén beam-lijn emuleren: (optionele SDL-sink-render) + 228 T-states Z80 +
 // de VDP-events van deze lijn. De vblank-ISR draait daardoor per definitie
 // ná het zichtbare veld — sprite-multiplexers kloppen zonder snapshot.
+// Dev-trace (SDL --trace F1 F2): logt per lijn de wijzigingen in de
+// splitgevoelige VDP-registers + IRQ-flanken, om raster-splitbugs te
+// ontleden. 0 = uit.
+volatile int machine_trace = 0;
+
 void __not_in_flash_func(machine_do_line)(int line)
 {
 #ifdef BAREMSX_MSX2
@@ -353,8 +358,25 @@ void __not_in_flash_func(machine_do_line)(int line)
             v9938_render_line(&v9938, linebuf2, line);
             g_line_sink(line, linebuf2, 512);
         }
+        uint8_t t0 = 0, t2 = 0, t19 = 0, t23 = 0, ts1 = 0;
+        bool tirq = false;
+        if (machine_trace) {
+            t0 = v9938.regs[0]; t2 = v9938.regs[2];
+            t19 = v9938.regs[19]; t23 = v9938.regs[23];
+            ts1 = v9938.status[1]; tirq = v9938_irq_asserted(&v9938);
+        }
         z80_run(&cpu, 228);
         v9938_scanline(&v9938, line);
+        if (machine_trace) {
+            if (t0 != v9938.regs[0] || t2 != v9938.regs[2] ||
+                t19 != v9938.regs[19] || t23 != v9938.regs[23] ||
+                (ts1 ^ v9938.status[1]) & 1 || tirq != v9938_irq_asserted(&v9938))
+                fprintf(stderr, "[trc] ln=%3d R0=%02X R2=%02X R19=%02X R23=%02X "
+                        "FH=%d INT=%d pc=%04X\n",
+                        line, v9938.regs[0], v9938.regs[2], v9938.regs[19],
+                        v9938.regs[23], v9938.status[1] & 1,
+                        v9938_irq_asserted(&v9938), Z80_PC(cpu));
+        }
         return;
     }
 #endif

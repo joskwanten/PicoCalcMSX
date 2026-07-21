@@ -159,7 +159,8 @@ int main(int argc, char **argv)
     // Testvlaggen: --slot1/--diska prefillen de menukeuze en slaan het menu
     // over; --frames N + --dump pad = headless draaien en het scherm dumpen.
     const char *arg_slot1 = NULL, *arg_slot2 = NULL, *arg_diska = NULL, *arg_dump = NULL;
-    int arg_frames = 0, arg_press = 0;
+    const char *arg_glitch = NULL;
+    int arg_frames = 0, arg_press = 0, arg_trace_from = 0, arg_trace_to = 0;
     bool arg_nomenu = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--slot1") && i + 1 < argc) arg_slot1 = argv[++i];
@@ -168,6 +169,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) arg_frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) arg_dump = argv[++i];
         else if (!strcmp(argv[i], "--press") && i + 1 < argc) arg_press = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--glitch") && i + 1 < argc) arg_glitch = argv[++i];
+        else if (!strcmp(argv[i], "--trace") && i + 2 < argc) {
+            arg_trace_from = atoi(argv[++i]);
+            arg_trace_to = atoi(argv[++i]);
+        }
         else if (!strcmp(argv[i], "--nomenu")) arg_nomenu = true;
     }
     if (arg_slot1 || arg_slot2 || arg_diska) arg_nomenu = true;
@@ -459,8 +465,59 @@ int main(int argc, char **argv)
         }
 
         // One MSX frame.
+        if (arg_trace_to > 0) {
+            extern volatile int machine_trace;
+            machine_trace = (frame_no >= arg_trace_from && frame_no <= arg_trace_to);
+            if (machine_trace) fprintf(stderr, "[trc] ==== frame %d ====\n", frame_no);
+        }
         machine_do_cycles();
         machine_generate_interrupt();
+
+        // Glitch-detector (--glitch padprefix): vergelijk het frame met het
+        // vorige; springt >50% van de (gesamplede) pixels om, dump dan
+        // beide frames + de VDP-registers van dat moment. Bedoeld om de
+        // sporadische "rommel-frames" in Quarth te vangen (headless is
+        // deterministisch, dus het framenummer is reproduceerbaar).
+        if (arg_glitch) {
+            static uint32_t *gprev = NULL;
+            static int gdumps = 0;
+            const uint32_t *cur = msx2 ? fb2 : fb;
+            size_t npx = (size_t)dw * (size_t)dh;
+            if (!gprev) {
+                gprev = malloc(npx * sizeof(uint32_t));
+                memcpy(gprev, cur, npx * sizeof(uint32_t));
+            } else {
+                size_t samples = 0, diff = 0;
+                for (size_t i = 0; i < npx; i += 4) {
+                    samples++;
+                    if (cur[i] != gprev[i]) diff++;
+                }
+                if (frame_no > 120 && diff * 2 > samples && gdumps < 20) {
+                    char path[512];
+                    snprintf(path, sizeof path, "%s_%05d_prev.ppm", arg_glitch, frame_no);
+                    dump_ppm(path, gprev, dw, dh);
+                    snprintf(path, sizeof path, "%s_%05d.ppm", arg_glitch, frame_no);
+                    dump_ppm(path, cur, dw, dh);
+                    gdumps++;
+#ifdef BAREMSX_MSX2
+                    if (msx2) {
+                        extern v9938_context_t v9938;
+                        fprintf(stderr, "[glitch] frame=%d diff=%d%% R0=%02X R1=%02X "
+                                "R2=%02X R3=%02X R4=%02X R5=%02X R6=%02X R7=%02X R9=%02X "
+                                "R14=%02X R19=%02X R23=%02X mode=%02X cm=%X pc=%04X\n",
+                                frame_no, (int)(diff * 100 / samples),
+                                v9938.regs[0], v9938.regs[1], v9938.regs[2], v9938.regs[3],
+                                v9938.regs[4], v9938.regs[5], v9938.regs[6], v9938.regs[7],
+                                v9938.regs[9], v9938.regs[14], v9938.regs[19], v9938.regs[23],
+                                ((v9938.regs[1] >> 4) & 1) | ((v9938.regs[1] >> 2) & 2) |
+                                    ((v9938.regs[0] & 0x0E) << 1),
+                                machine_dbg_pc());
+                    }
+#endif
+                }
+                memcpy(gprev, cur, npx * sizeof(uint32_t));
+            }
+        }
 
         // Audio: queue one frame, but don't let the queue build unbounded latency.
         machine_get_audio(audio, AUDIO_SAMPLES_PER_FRAME * 2);

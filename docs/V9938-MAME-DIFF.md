@@ -20,6 +20,15 @@ mirroring, TP, Y-wrap 208/216). Regressietests: `tests/v9938_cmd_test.c`
 Nog open: R9 (R18 set-adjust), R13 (G6/G7 VRAM-interleave) en de
 ontbrekende features (T2-blink, interlace/EO-paginawissel, MC/screen 3).
 
+**Emulatie-specifiek (geen MAME-diff):** onze lijnlus draait de Z80 vóór de
+VDP-lijnevents. Daardoor miste een IE1-aanzet-write de FH-wis die de
+hardware aan het begin van diezelfde (niet-matchende) lijn al gedaan had —
+een in vblank geparkeerde FH vuurde dan als spookinterrupt zodra de
+vblank-ISR IE1 aanzette (Quarth: heel frame uit de HUD-pagina = sporadisch
+rommel-frame). Fix: de gemiste wis wordt op de IE1-flank ingehaald
+(reg_write case 0, met beam_line-context). Gevonden met de nieuwe
+`--glitch`/`--trace`-vlaggen van de SDL-frontend.
+
 ## Quarth-shortlist
 
 Quarth (SCREEN 5) scrollt het speelveld met HMMM/HMMV, gebruikt

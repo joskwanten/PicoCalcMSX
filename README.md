@@ -165,6 +165,11 @@ cmake --build sdl/build
 Handy dev flags: `--slot1 game.rom` / `--diska image.dsk` preselect the menu,
 `--nomenu` skips it, and `--frames N --dump out.ppm` runs headless for N
 frames and dumps the screen — useful for scripted VDP regression checks.
+For hunting intermittent glitches: `--glitch prefix` dumps any frame that
+differs >50% from the previous one (plus the VDP registers at that moment),
+and `--trace F1 F2` logs per-line changes to the split-sensitive VDP
+registers for frames F1..F2. Headless runs are deterministic, so a glitch
+frame number reproduces exactly.
 
 #### Windows (scoop)
 

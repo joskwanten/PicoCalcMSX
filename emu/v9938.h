@@ -54,6 +54,7 @@ typedef struct {
 
     // Interrupts: frame-IRQ (IE0/S0-F) en lijn-IRQ (IE1/R19, ack via S1).
     bool line_irq_pending;
+    int16_t beam_line; // laatst verwerkte scanline (voor de IE1-flankwis)
     v9938_irq_func_t irq_func;
 
     // Command-engine (R32-R46). VRAM-commando's voeren synchroon uit bij de

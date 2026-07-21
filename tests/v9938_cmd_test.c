@@ -282,6 +282,28 @@ static void test_sprite_9th_m2(void)
     CHECK((s0 & 0x1F) == 8, "5S-nummer niet 8: %d", s0 & 0x1F);
 }
 
+// Quarth-rommel-frame: een FH die met IE1 uit in vblank geparkeerd latcht,
+// mag geen spookinterrupt vuren zodra de vblank-ISR IE1 aanzet — de
+// hardware had hem aan het begin van de niet-matchende lijn al gewist.
+static void test_ie1_enable_stale_fh(void)
+{
+    setup_g4();
+    wreg(19, 214); wreg(23, 0);
+    v9938_scanline(&ctx, 214); // matchlijn: FH latcht (IE1 uit)
+    CHECK(ctx.status[1] & 0x01, "FH niet gelatcht op matchlijn");
+    wreg(0, 0x16); // IE1 aan tijdens lijn 215 (beam_line+1)
+    CHECK(!(ctx.status[1] & 0x01), "stale FH overleeft de IE1-flank");
+    CHECK(!v9938_irq_asserted(&ctx), "spook-INT bij IE1-flank");
+    // Maar op de matchlijn zelf aangezet: FH blijft en INT vuurt.
+    wreg(0, 0x06);
+    wreg(19, 100);
+    v9938_scanline(&ctx, 99); // beam_line=99: "we zitten in lijn 100"
+    ctx.status[1] |= 0x01;    // FH van matchlijn 100 (gesimuleerd)
+    wreg(0, 0x16);
+    CHECK(ctx.status[1] & 0x01, "FH van de actuele matchlijn gewist");
+    CHECK(v9938_irq_asserted(&ctx), "INT blijft uit op de matchlijn");
+}
+
 // C3: een groot commando blijft realistische tijd busy (MAME-budgetmodel).
 static void test_cmd_busy_duration(void)
 {
@@ -319,6 +341,7 @@ int main(void)
     test_ctrl_write_gate();
     test_sprite_collision_m2();
     test_sprite_9th_m2();
+    test_ie1_enable_stale_fh();
     test_cmd_busy_duration();
     if (fails) { printf("%d FAILED\n", fails); return 1; }
     printf("alle tests OK\n");

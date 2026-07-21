@@ -143,15 +143,33 @@ static void __not_in_flash_func(reg_write)(v9938_context_t *ctx, int n, uint8_t 
 {
     n &= 0x3F;
     if (n <= 27) v &= reg_mask[n];
+    uint8_t old = ctx->regs[n];
     ctx->regs[n] = v;
 #ifdef VDP_CMD_DEBUG
     if (n == 23 || n == 19 || n == 2 || n == 9)
         fprintf(stderr, "[reg] R%d=%02X\n", n, v);
 #endif
     switch (n) {
-    // R0/R1 (IE1/IE0): geen actie hier — de host herrekent de INT-lijn na
-    // elke 0x99/0x9B-write volledig uit v9938_irq_asserted(), zodat zowel
-    // "IE aan met hangende flag" als "IE uit -> INT intrekken" klopt.
+    // R0/R1 (IE1/IE0): de host herrekent de INT-lijn na elke 0x99/0x9B-
+    // write volledig uit v9938_irq_asserted(), zodat zowel "IE aan met
+    // hangende flag" als "IE uit -> INT intrekken" klopt.
+    case 0:
+        // IE1-flank 0->1: de hardware wist FH aan het BEGIN van elke
+        // niet-matchende lijn zolang IE1 uit staat — dus vóór de OUT die
+        // IE1 aanzet. Onze lus draait de Z80 eerst en de lijnevents erna,
+        // waardoor die laatste wis-grens gemist wordt: een geparkeerde FH
+        // van een eerdere (vblank-)matchlijn zou dan als spookinterrupt
+        // vuren zodra IE1 aangaat. Haal de gemiste wis hier in, tenzij de
+        // lijn die nu onderhanden is (beam_line+1) zelf de matchlijn is.
+        // (Quarth: de HUD-fase parkeert R19 in vblank; zonder deze wis
+        // draaide de split-ISR spontaan in vblank en rendert het volgende
+        // frame volledig uit de HUD-pagina — het "rommel-frame".)
+        if (!(old & 0x10) && (v & 0x10) && (ctx->status[1] & S1_FH) &&
+            ((ctx->beam_line + 1 + ctx->regs[23]) & 0xFF) != ctx->regs[19]) {
+            ctx->status[1] &= (uint8_t)~S1_FH;
+            ctx->line_irq_pending = false;
+        }
+        break;
     case 14:
         // A16-A14 van de actieve pointer (§4.1).
         ctx->vram_addr = (ctx->vram_addr & 0x3FFF) | (((uint32_t)v & 7) << 14);
@@ -755,6 +773,7 @@ static inline bool cmd_block_active(const v9938_context_t *ctx)
 void __not_in_flash_func(v9938_scanline)(v9938_context_t *ctx, int line)
 {
     int active_h = (ctx->regs[9] & 0x80) ? 212 : 192;
+    ctx->beam_line = (int16_t)line;
 
     // Command-engine-budget bijvullen en een lopend blokcommando een stuk
     // verder laten lopen (MAME's update_command).
