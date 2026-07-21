@@ -68,9 +68,13 @@ naast de framebuffers in 520KB SRAM).
 4. **Machine**: mapper-RAM, sub-ROM, RTC, lijn-granulaire emulatielus
    (228 T-states/lijn i.p.v. frame-in-één-keer — nodig voor lijn-IRQs),
    machineprofiel-keuze (MSX1/MSX2 o.b.v. system/-inhoud), menu.
-5. **V9958/MSX2+** (uitgewerkt onder "Fase 5" hieronder).
+5. **V9938 afronding**: de openstaande punten uit `docs/V9938-MAME-DIFF.md`
+   (R#18 set-adjust, interlace/EO-paginawissel, T2-blink, G6/G7-interleave,
+   MC/SCREEN 3). Losse, per stuk oppakbare klussen; de eerste twee zijn het
+   voorwerk voor fase 6.
+6. **V9958/MSX2+** (uitgewerkt onder "Fase 6" hieronder).
 
-## Fase 5: V9958 / MSX2+
+## Fase 6: V9958 / MSX2+
 
 MSX2+ = de **V9958-VDP** (superset van de V9938, géén extra VRAM) plus een
 **MSX2+-machineprofiel** (andere MAIN/SUB-ROM, meestal ingebouwde FM). Nog
@@ -87,9 +91,10 @@ chips (incl. YJK), dus dit is vooral vertaal- en integratiewerk.
 - MAME als kopieerbare BSD-3-referentie; `mode_graphic4` toont de
   R#25/26/27-scrollogica al kant-en-klaar.
 
-### Voorwerk (openstaande V9938-punten die MSX2+-software óók raakt)
+### Voorwerk (uit fase 5)
 
-Uit `docs/V9938-MAME-DIFF.md`, vóór de V9958-modes zinvol zijn:
+Fase 5 (V9938-afronding) levert de bouwstenen die MSX2+-software óók raakt;
+vóór de V9958-modes zinvol zijn vooral:
 - **Interlace / EO-paginawissel** (R#9 IL/EO) — 512×424 en page-flip-trucs.
 - **R#18 set-adjust** — beeldcentrering/schud-effecten.
 (T2-blink, G6/G7-interleave en MC/SCREEN 3 mogen later; niet blokkerend.)
