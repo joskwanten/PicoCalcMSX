@@ -226,6 +226,51 @@ static void test_ctrl_write_gate(void)
     CHECK(ctx.regs[7] == before, "0xC0-write muteerde R7: %02X", ctx.regs[7]);
 }
 
+// T4/R5: sprite mode 2 — collisie zet S0.C, laagste nummer wint.
+static void test_sprite_collision_m2(void)
+{
+    setup_g4();
+    wreg(5, 0xFC); wreg(11, 0x00); // SAT = 0x7E00, kleurtabel = 0x7C00
+    wreg(6, 0x00);                 // patroontabel = 0x0000
+    wreg(8, 0x00);                 // sprites aan
+    memset(vram, 0, sizeof vram);
+    for (int i = 0; i < 8; i++) vram[i] = 0xFF; // patroon 0: vol blok
+    // Sprite 0 en 1 overlappen volledig op x=10, y-lijnen 1-8.
+    vram[0x7E00 + 0] = 0; vram[0x7E01] = 10; vram[0x7E02] = 0;
+    vram[0x7E04 + 0] = 0; vram[0x7E05] = 10; vram[0x7E06] = 0;
+    vram[0x7E08] = 216; // sentinel
+    for (int n = 0; n < 8; n++) {
+        vram[0x7C00 + 0 * 16 + n] = 5; // sprite 0: kleur 5, CC=0
+        vram[0x7C00 + 1 * 16 + n] = 7; // sprite 1: kleur 7, CC=0
+    }
+    uint32_t line[512];
+    v9938_render_line(&ctx, line, 1);
+    uint8_t s0 = rstat(0);
+    CHECK(s0 & 0x20, "S0.C niet gezet bij sprite-overlap: %02X", s0);
+    CHECK(line[2 * 12] == ctx.palette[5], "sprite 0 (laagste nummer) wint niet");
+}
+
+// T4: 9e sprite op een lijn zet 5S + het spritenummer.
+static void test_sprite_9th_m2(void)
+{
+    setup_g4();
+    wreg(5, 0xFC); wreg(11, 0x00); wreg(6, 0x00); wreg(8, 0x00);
+    memset(vram, 0, sizeof vram);
+    for (int i = 0; i < 8; i++) vram[i] = 0xFF;
+    for (int s = 0; s < 10; s++) { // 10 sprites allemaal op dezelfde lijnen
+        vram[0x7E00 + 4 * s] = 0;
+        vram[0x7E01 + 4 * s] = (uint8_t)(s * 20);
+        vram[0x7E02 + 4 * s] = 0;
+        for (int n = 0; n < 8; n++) vram[0x7C00 + s * 16 + n] = 5;
+    }
+    vram[0x7E00 + 4 * 10] = 216;
+    uint32_t line[512];
+    v9938_render_line(&ctx, line, 1);
+    uint8_t s0 = rstat(0);
+    CHECK(s0 & 0x40, "5S niet gezet bij 9 sprites: %02X", s0);
+    CHECK((s0 & 0x1F) == 8, "5S-nummer niet 8: %d", s0 & 0x1F);
+}
+
 int main(void)
 {
     test_hmmv_edge_clip();
@@ -242,6 +287,8 @@ int main(void)
     test_mxc_data_port();
     test_fixed_status_bits();
     test_ctrl_write_gate();
+    test_sprite_collision_m2();
+    test_sprite_9th_m2();
     if (fails) { printf("%d FAILED\n", fails); return 1; }
     printf("alle tests OK\n");
     return 0;
