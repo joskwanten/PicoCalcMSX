@@ -97,6 +97,7 @@ void v9938_init(v9938_context_t *ctx, uint8_t *vram128k)
     ctx->status[2] = S2_TR | 0x0C;
     ctx->status[4] = 0xFE;
     ctx->status[6] = 0xFC;
+    ctx->cops = 13662; // command-engine-budget (zie CMD_OPS_PER_LINE)
 }
 
 void v9938_register_interrupt_func(v9938_context_t *ctx, v9938_irq_func_t f)
@@ -390,154 +391,191 @@ static void __not_in_flash_func(cmd_done)(v9938_context_t *ctx)
     ctx->ce_hold = 4;
 }
 
-// VRAM-vullingen/kopieën. Byte-commando's (H*) werken per byte, de
-// pixelcommando's (L*) per pixel met logische op. Lussemantiek naar MAME:
+// Busy-tijd (MAME): elke engine-eenheid (byte voor H*-ops, pixel voor
+// L*-ops) kost 'delta' eenheden uit een tabel per commando, geïndexeerd op
+// scherm-aan | sprites-uit | PAL; het budget is 13662 eenheden per scanline
+// (bijgevuld in v9938_scanline). Zo blijft CE realistisch lang hoog en
+// muteert VRAM in de pas met de beam — precies waar race-the-beam-software
+// (Quarth!) op leunt.
+#define CMD_OPS_PER_LINE 13662
+
+static const int srch_timing[8] = { 818, 1025, 818, 830, 696, 854, 696, 684 };
+static const int line_timing[8] = { 1063, 1259, 1063, 1161, 904, 1026, 904, 953 };
+static const int hmmv_timing[8] = { 439, 549, 439, 531, 366, 439, 366, 427 };
+static const int lmmv_timing[8] = { 873, 1135, 873, 1056, 732, 909, 732, 854 };
+static const int ymmm_timing[8] = { 586, 952, 586, 610, 488, 720, 488, 500 };
+static const int hmmm_timing[8] = { 818, 1111, 818, 854, 684, 879, 684, 708 };
+static const int lmmm_timing[8] = { 1160, 1599, 1160, 1172, 964, 1257, 964, 977 };
+
+static inline int cmd_timing(const v9938_context_t *ctx, const int *t)
+{
+    return t[((ctx->regs[1] >> 6) & 1) | (ctx->regs[8] & 2) | ((ctx->regs[9] << 1) & 4)];
+}
+
+// Hervatbare engine voor de blokcommando's. Werkstate leeft in de context:
+// casx/cadx/canx zijn de rijtellers (LINE: casx = Bresenham-accu, cadx =
+// pixelteller; SRCH: casx = lopende SX, canx = NEQ-vlag), csy/cdy/cny de
+// muterende Y-state; csx/cdx/cnx blijven gelatcht voor de rij-reset.
+// Lussemantiek naar MAME:
 //  - een rij eindigt zodra de teller op is OF X de rand kruist (x & width,
 //    vangt zowel x==width als x==-1) — geen wrap naar de andere kant;
 //  - het commando breekt af zodra SY/DY bij DIY=-1 onder 0 zakt;
 //  - NY telt af met &1023 (NY=0 -> effectief 1024 rijen), en de eindstand
-//    van SY/DY/NY gaat terug de registers in.
-static void __not_in_flash_func(cmd_run_vram)(v9938_context_t *ctx, uint8_t cm)
+//    van SY/DY/NY gaat bij voltooiing terug de registers in.
+static void __not_in_flash_func(cmd_engine)(v9938_context_t *ctx)
 {
     cmd_layout_t L = cmd_layout(ctx);
     int width = (int)L.width;
-    uint8_t clr = ctx->regs[44];
-    int tx = ctx->cdix, ty = ctx->cdiy;      // dot-stap
-    int btx = tx * (int)L.ppb;               // byte-stap
-    int sy = ctx->csy, dy = ctx->cdy;
-    int ny = ctx->cny;
-    int nx = ctx->cnx;                       // dot-eenheden
-    int nxb = (int)(ctx->cnx / L.ppb);       // byte-eenheden
+    int tx = ctx->cdix, btx = ctx->cdix * (int)L.ppb, ty = ctx->cdiy;
+    uint8_t clr = ctx->cclr;
 
-    switch (cm) {
+    switch (ctx->cm) {
     case 0xC: { // HMMV: byte-vulling
-        int adx = ctx->cdx, anx = nxb;
-        for (;;) {
+        int delta = cmd_timing(ctx, hmmv_timing);
+        while ((ctx->cops -= delta) > 0) {
             if (!ctx->cmxd)
-                ctx->vram[cmd_addr(&L, (uint32_t)adx, (uint32_t)dy)] = clr;
-            if (!--anx || ((adx += btx) & width)) {
-                if (!(--ny & 1023) || (dy += ty) == -1) break;
-                adx = ctx->cdx; anx = nxb;
+                ctx->vram[cmd_addr(&L, (uint32_t)ctx->cadx, (uint32_t)ctx->cdy)] = clr;
+            if (!--ctx->canx || ((ctx->cadx += btx) & width)) {
+                if (!(--ctx->cny & 1023) || (ctx->cdy += ty) == -1) {
+                    if (!ctx->cny) ctx->cdy += ty;
+                    wb_dy_ny(ctx, ctx->cdy, ctx->cny);
+                    cmd_done(ctx);
+                    return;
+                }
+                ctx->cadx = ctx->cdx;
+                ctx->canx = (int16_t)(ctx->cnx / L.ppb);
             }
         }
-        if (!ny) dy += ty;
-        wb_dy_ny(ctx, dy, ny);
         break;
     }
     case 0xD: { // HMMM: byte-kopie
-        int asx = ctx->csx, adx = ctx->cdx, anx = nxb;
-        for (;;) {
+        int delta = cmd_timing(ctx, hmmm_timing);
+        while ((ctx->cops -= delta) > 0) {
             if (!ctx->cmxd)
-                ctx->vram[cmd_addr(&L, (uint32_t)adx, (uint32_t)dy)] = ctx->cmxs
-                    ? 0xFF : ctx->vram[cmd_addr(&L, (uint32_t)asx, (uint32_t)sy)];
-            if (!--anx || ((asx += btx) & width) || ((adx += btx) & width)) {
-                if (!(--ny & 1023) || (sy += ty) == -1 || (dy += ty) == -1) break;
-                asx = ctx->csx; adx = ctx->cdx; anx = nxb;
+                ctx->vram[cmd_addr(&L, (uint32_t)ctx->cadx, (uint32_t)ctx->cdy)] = ctx->cmxs
+                    ? 0xFF : ctx->vram[cmd_addr(&L, (uint32_t)ctx->casx, (uint32_t)ctx->csy)];
+            if (!--ctx->canx || ((ctx->casx += btx) & width) || ((ctx->cadx += btx) & width)) {
+                if (!(--ctx->cny & 1023) || (ctx->csy += ty) == -1 || (ctx->cdy += ty) == -1) {
+                    if (!ctx->cny) { ctx->csy += ty; ctx->cdy += ty; }
+                    else if (ctx->csy == -1) ctx->cdy += ty;
+                    wb_sy(ctx, ctx->csy);
+                    wb_dy_ny(ctx, ctx->cdy, ctx->cny);
+                    cmd_done(ctx);
+                    return;
+                }
+                ctx->casx = ctx->csx;
+                ctx->cadx = ctx->cdx;
+                ctx->canx = (int16_t)(ctx->cnx / L.ppb);
             }
         }
-        if (!ny) { sy += ty; dy += ty; }
-        else if (sy == -1) dy += ty;
-        wb_sy(ctx, sy);
-        wb_dy_ny(ctx, dy, ny);
         break;
     }
     case 0xE: { // YMMM: byte-kopie in Y (bron én doel via MXD, zoals MAME)
-        int adx = ctx->cdx;
-        for (;;) {
+        int delta = cmd_timing(ctx, ymmm_timing);
+        while ((ctx->cops -= delta) > 0) {
             if (!ctx->cmxd)
-                ctx->vram[cmd_addr(&L, (uint32_t)adx, (uint32_t)dy)] =
-                    ctx->vram[cmd_addr(&L, (uint32_t)adx, (uint32_t)sy)];
-            if ((adx += btx) & width) {
-                if (!(--ny & 1023) || (sy += ty) == -1 || (dy += ty) == -1) break;
-                adx = ctx->cdx;
+                ctx->vram[cmd_addr(&L, (uint32_t)ctx->cadx, (uint32_t)ctx->cdy)] =
+                    ctx->vram[cmd_addr(&L, (uint32_t)ctx->cadx, (uint32_t)ctx->csy)];
+            if ((ctx->cadx += btx) & width) {
+                if (!(--ctx->cny & 1023) || (ctx->csy += ty) == -1 || (ctx->cdy += ty) == -1) {
+                    if (!ctx->cny) { ctx->csy += ty; ctx->cdy += ty; }
+                    else if (ctx->csy == -1) ctx->cdy += ty;
+                    wb_sy(ctx, ctx->csy);
+                    wb_dy_ny(ctx, ctx->cdy, ctx->cny);
+                    cmd_done(ctx);
+                    return;
+                }
+                ctx->cadx = ctx->cdx;
             }
         }
-        if (!ny) { sy += ty; dy += ty; }
-        else if (sy == -1) dy += ty;
-        wb_sy(ctx, sy);
-        wb_dy_ny(ctx, dy, ny);
         break;
     }
     case 0x8: { // LMMV: pixel-vulling met log. op
-        int adx = ctx->cdx, anx = nx;
-        for (;;) {
-            vdp_pset(ctx, (uint32_t)adx, (uint32_t)dy, clr, ctx->clo);
-            if (!--anx || ((adx += tx) & width)) {
-                if (!(--ny & 1023) || (dy += ty) == -1) break;
-                adx = ctx->cdx; anx = nx;
+        int delta = cmd_timing(ctx, lmmv_timing);
+        while ((ctx->cops -= delta) > 0) {
+            vdp_pset(ctx, (uint32_t)ctx->cadx, (uint32_t)ctx->cdy, clr, ctx->clo);
+            if (!--ctx->canx || ((ctx->cadx += tx) & width)) {
+                if (!(--ctx->cny & 1023) || (ctx->cdy += ty) == -1) {
+                    if (!ctx->cny) ctx->cdy += ty;
+                    wb_dy_ny(ctx, ctx->cdy, ctx->cny);
+                    cmd_done(ctx);
+                    return;
+                }
+                ctx->cadx = ctx->cdx;
+                ctx->canx = (int16_t)ctx->cnx;
             }
         }
-        if (!ny) dy += ty;
-        wb_dy_ny(ctx, dy, ny);
         break;
     }
     case 0x9: { // LMMM: pixel-kopie met log. op
-        int asx = ctx->csx, adx = ctx->cdx, anx = nx;
-        for (;;) {
-            vdp_pset(ctx, (uint32_t)adx, (uint32_t)dy,
-                     vdp_point(ctx, (uint32_t)asx, (uint32_t)sy), ctx->clo);
-            if (!--anx || ((asx += tx) & width) || ((adx += tx) & width)) {
-                if (!(--ny & 1023) || (sy += ty) == -1 || (dy += ty) == -1) break;
-                asx = ctx->csx; adx = ctx->cdx; anx = nx;
+        int delta = cmd_timing(ctx, lmmm_timing);
+        while ((ctx->cops -= delta) > 0) {
+            vdp_pset(ctx, (uint32_t)ctx->cadx, (uint32_t)ctx->cdy,
+                     vdp_point(ctx, (uint32_t)ctx->casx, (uint32_t)ctx->csy), ctx->clo);
+            if (!--ctx->canx || ((ctx->casx += tx) & width) || ((ctx->cadx += tx) & width)) {
+                if (!(--ctx->cny & 1023) || (ctx->csy += ty) == -1 || (ctx->cdy += ty) == -1) {
+                    if (!ctx->cny) { ctx->csy += ty; ctx->cdy += ty; }
+                    else if (ctx->csy == -1) ctx->cdy += ty;
+                    wb_sy(ctx, ctx->csy);
+                    wb_dy_ny(ctx, ctx->cdy, ctx->cny);
+                    cmd_done(ctx);
+                    return;
+                }
+                ctx->casx = ctx->csx;
+                ctx->cadx = ctx->cdx;
+                ctx->canx = (int16_t)ctx->cnx;
             }
         }
-        if (!ny) { sy += ty; dy += ty; }
-        else if (sy == -1) dy += ty;
-        wb_sy(ctx, sy);
-        wb_dy_ny(ctx, dy, ny);
         break;
     }
     case 0x7: { // LINE: Bresenham langs de major-as (MAJ = ARG bit 0)
+        int delta = cmd_timing(ctx, line_timing);
         bool ymajor = (ctx->regs[45] & 0x01) != 0;
-        int dx = ctx->cdx;
-        int asx = (nx - 1) >> 1, adx = 0; // MAME's afrondingsinit
-        for (;;) {
-            vdp_pset(ctx, (uint32_t)dx, (uint32_t)dy, clr, ctx->clo);
+        while ((ctx->cops -= delta) > 0) {
+            vdp_pset(ctx, (uint32_t)ctx->cdx, (uint32_t)ctx->cdy, clr, ctx->clo);
             if (ymajor) {
-                dy += ty;
-                if ((asx -= (int)ctx->cny) < 0) { asx += nx; dx += tx; }
+                ctx->cdy += ty;
+                if ((ctx->casx -= ctx->cny) < 0) { ctx->casx += (int16_t)ctx->cnx; ctx->cdx += tx; }
             } else {
-                dx += tx;
-                if ((asx -= (int)ctx->cny) < 0) { asx += nx; dy += ty; }
+                ctx->cdx += tx;
+                if ((ctx->casx -= ctx->cny) < 0) { ctx->casx += (int16_t)ctx->cnx; ctx->cdy += ty; }
             }
-            asx &= 1023;
-            if (adx++ == nx || (dx & width)) break;
+            ctx->casx &= 1023;
+            if (ctx->cadx++ == (int16_t)ctx->cnx || (ctx->cdx & width)) {
+                // LINE schrijft alleen DY terug (MAME), NY blijft staan.
+                ctx->regs[38] = (uint8_t)(ctx->cdy & 0xFF);
+                ctx->regs[39] = (uint8_t)((ctx->cdy >> 8) & 3);
+                cmd_done(ctx);
+                return;
+            }
         }
-        // LINE schrijft alleen DY terug (MAME), NY blijft onaangeroerd.
-        ctx->regs[38] = (uint8_t)(dy & 0xFF);
-        ctx->regs[39] = (uint8_t)((dy >> 8) & 3);
         break;
     }
-    case 0x6: { // SRCH: zoek kleur (EQ = ARG bit 1) langs lijn SY vanaf SX
-        bool neq = (ctx->regs[45] & 0x02) != 0;
-        int sx = ctx->csx;
-        for (;;) {
-            uint8_t c = vdp_point(ctx, (uint32_t)sx, (uint32_t)sy);
-            if ((c == clr) != neq) { // hit
+    case 0x6: { // SRCH: zoek kleur (NEQ in canx) langs lijn SY vanaf SX
+        int delta = cmd_timing(ctx, srch_timing);
+        while ((ctx->cops -= delta) > 0) {
+            uint8_t c = vdp_point(ctx, (uint32_t)ctx->casx, (uint32_t)ctx->csy);
+            bool done = false;
+            if ((c == clr) != (ctx->canx != 0)) { // hit
                 ctx->status[2] |= S2_BD;
-                break;
-            }
-            if ((sx += tx) & width) { // rand bereikt zonder hit
+                done = true;
+            } else if ((ctx->casx += tx) & width) { // rand zonder hit
                 ctx->status[2] &= (uint8_t)~S2_BD;
-                break;
+                done = true;
+            }
+            if (done) {
+                // S8/S9 krijgen de eindpositie ALTIJD (ook zonder hit).
+                ctx->status[8] = (uint8_t)(ctx->casx & 0xFF);
+                ctx->status[9] = (uint8_t)(((unsigned)ctx->casx >> 8) | 0xFE);
+                cmd_done(ctx);
+                return;
             }
         }
-        // S8/S9 krijgen de eindpositie ALTIJD (ook zonder hit).
-        ctx->status[8] = (uint8_t)(sx & 0xFF);
-        ctx->status[9] = (uint8_t)(((unsigned)sx >> 8) | 0xFE);
         break;
     }
-    case 0x5: // PSET
-        vdp_pset(ctx, (uint32_t)ctx->cdx, (uint32_t)ctx->cdy, clr, ctx->clo);
-        break;
-    case 0x4: // POINT -> S7 (en R44, zoals hardware)
-        ctx->status[7] = ctx->regs[44] =
-            vdp_point(ctx, (uint32_t)ctx->csx, (uint32_t)ctx->csy);
-        break;
     default:
         break;
     }
-    cmd_done(ctx);
 }
 
 // R46-write: commando starten. Buiten G4-G7 is élke R46-write een no-op
@@ -593,7 +631,48 @@ static void __not_in_flash_func(cmd_start)(v9938_context_t *ctx, uint8_t v)
         ctx->status[7] = vdp_point(ctx, (uint32_t)ctx->casx, (uint32_t)ctx->csy);
         return;
     }
-    cmd_run_vram(ctx, cm);
+    if (cm == 0x5) { // PSET: synchroon (MAME)
+        vdp_pset(ctx, (uint32_t)ctx->cdx, (uint32_t)ctx->cdy, ctx->regs[44], ctx->clo);
+        cmd_done(ctx);
+        return;
+    }
+    if (cm == 0x4) { // POINT -> S7 én R44 (hardware): synchroon
+        ctx->status[7] = ctx->regs[44] =
+            vdp_point(ctx, (uint32_t)ctx->csx, (uint32_t)ctx->csy);
+        cmd_done(ctx);
+        return;
+    }
+    if (cm < 0x6) return; // 1-3: ongeldig, negeren
+
+    // Blokcommando: werkstate initialiseren en de engine starten met het
+    // resterende scanline-budget (op=0 -> hij loopt verder in de volgende
+    // v9938_scanline-aanroep, zoals MAME's update_command).
+    cmd_layout_t L = cmd_layout(ctx);
+    ctx->cm = cm;
+    ctx->cclr = ctx->regs[44];
+    ctx->status[2] |= S2_CE;
+    switch (cm) {
+    case 0x7: // LINE
+        ctx->casx = (int16_t)((ctx->cnx - 1) >> 1); // Bresenham-afrondingsinit
+        ctx->cadx = 0;                              // pixelteller
+        break;
+    case 0x6: // SRCH
+        ctx->casx = ctx->csx;
+        ctx->canx = (ctx->regs[45] & 0x02) ? 1 : 0; // NEQ-vlag
+        break;
+    case 0xC: case 0xD: // HMMV/HMMM: byte-eenheden
+        ctx->casx = ctx->csx;
+        ctx->cadx = ctx->cdx;
+        ctx->canx = (int16_t)(ctx->cnx / L.ppb);
+        break;
+    default: // LMMV/LMMM/YMMM
+        ctx->casx = ctx->csx;
+        ctx->cadx = ctx->cdx;
+        ctx->canx = (int16_t)ctx->cnx;
+        break;
+    }
+    if (ctx->cops > 0)
+        cmd_engine(ctx);
 }
 
 // Eén stap van een lopende CPU-transfer (R44-write of S7-read). Zelfde
@@ -606,6 +685,7 @@ static void __not_in_flash_func(cmd_cpu_step)(v9938_context_t *ctx, uint8_t data
     int tx = ctx->cdix, btx = ctx->cdix * (int)L.ppb, ty = ctx->cdiy;
     switch (ctx->cm) {
     case 0xF: // HMMC: byte schrijven, dan tellers doorschuiven
+        ctx->cops -= cmd_timing(ctx, hmmv_timing);
         if (!ctx->cmxd)
             ctx->vram[cmd_addr(&L, (uint32_t)ctx->cadx, (uint32_t)ctx->cdy)] = data;
         if (!--ctx->canx || ((ctx->cadx += btx) & width)) {
@@ -620,6 +700,7 @@ static void __not_in_flash_func(cmd_cpu_step)(v9938_context_t *ctx, uint8_t data
         }
         break;
     case 0xB: // LMMC: pixel met log. op (data per byte op pixelbreedte gemaskt)
+        ctx->cops -= cmd_timing(ctx, lmmv_timing);
         data &= cmd_color_mask(&L);
         ctx->status[7] = data;
         vdp_pset(ctx, (uint32_t)ctx->cadx, (uint32_t)ctx->cdy, data, ctx->clo);
@@ -635,6 +716,7 @@ static void __not_in_flash_func(cmd_cpu_step)(v9938_context_t *ctx, uint8_t data
         }
         break;
     case 0xA: // LMCM: tellers doorschuiven, volgende pixel in S7
+        ctx->cops -= cmd_timing(ctx, lmmv_timing);
         if (!--ctx->canx || ((ctx->casx += tx) & width)) {
             if (!(--ctx->cny & 1023) || (ctx->csy += ty) == -1) {
                 wb_sy(ctx, ctx->csy);
@@ -664,9 +746,24 @@ static void __not_in_flash_func(cmd_cpu_step)(v9938_context_t *ctx, uint8_t data
 //    een split te vroeg. Met IE1 aan blijft FH gelatcht tot de S1-read.
 //  - VR is hoog in de verticale blanking (lijn >= actieve hoogte).
 //  - Op de eerste vblank-lijn: S0.F + frame-IRQ (IE0).
+// Blokcommando actief (CPU-transfers lopen event-gedreven via cmd_cpu_step)?
+static inline bool cmd_block_active(const v9938_context_t *ctx)
+{
+    return ctx->cm != 0 && ctx->cm != 0xA && ctx->cm != 0xB && ctx->cm != 0xF;
+}
+
 void __not_in_flash_func(v9938_scanline)(v9938_context_t *ctx, int line)
 {
     int active_h = (ctx->regs[9] & 0x80) ? 212 : 192;
+
+    // Command-engine-budget bijvullen en een lopend blokcommando een stuk
+    // verder laten lopen (MAME's update_command).
+    if (ctx->cops <= 0)
+        ctx->cops += CMD_OPS_PER_LINE;
+    else
+        ctx->cops = CMD_OPS_PER_LINE;
+    if (cmd_block_active(ctx) && ctx->cops > 0)
+        cmd_engine(ctx);
 
     if (((line + ctx->regs[23]) & 0xFF) == ctx->regs[19]) {
         ctx->status[1] |= S1_FH;
@@ -691,9 +788,15 @@ void __not_in_flash_func(v9938_scanline)(v9938_context_t *ctx, int line)
     }
 }
 
-// Frame-granulaire fallback (MSX1-lus / oude aanroepers).
+// Frame-granulaire fallback (MSX1-lus / oude aanroepers): zonder scanline-
+// lus is er geen budget-drip, dus een lopend blokcommando hier in één keer
+// afmaken.
 void v9938_vblank(v9938_context_t *ctx)
 {
+    if (cmd_block_active(ctx)) {
+        ctx->cops = 1 << 28;
+        cmd_engine(ctx);
+    }
     v9938_scanline(ctx, (ctx->regs[9] & 0x80) ? 212 : 192);
 }
 

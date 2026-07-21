@@ -11,12 +11,14 @@ Drie onafhankelijke deelscans (command-engine; rendering/sprites;
 registers/status/timing) — bevindingen die in meerdere scans opdoken
 staan één keer, met de sterkste onderbouwing.
 
-**Status (2026-07-21):** de Quarth-shortlist plus de kleine command-engine-
-punten zijn doorgevoerd: T1, T2, T3, C1, C2 (quickfix: CE volgt cm/ce_hold),
-C4, C5, C6, C7, C8, C9 en van C10 de ongeldige ops, de SRCH-BD-semantiek en
-de YMMM-bytetelling. Regressietests: `tests/v9938_cmd_test.c` (standalone,
-geen BIOS nodig). Nog open: C3 (busy-timingmodel — wacht op de scanline-lus
-van portfase 4), C10-MXS/MXD, T4-T10 en alle R-bevindingen.
+**Status (2026-07-21):** alle C-bevindingen (incl. C3: het MAME-budgetmodel,
+13662 eenheden/scanline met de timingtabellen per commando/mode), alle
+T-bevindingen en R1-R8/R10-R12 zijn doorgevoerd. Sprite mode 1+2 zijn
+herschreven naar MAME-semantiek (S0-statusbits, CC-gating, kleurtabel-
+mirroring, TP, Y-wrap 208/216). Regressietests: `tests/v9938_cmd_test.c`
+(17 stuks, standalone, geen BIOS nodig).
+Nog open: R9 (R18 set-adjust), R13 (G6/G7 VRAM-interleave) en de
+ontbrekende features (T2-blink, interlace/EO-paginawissel, MC/screen 3).
 
 ## Quarth-shortlist
 

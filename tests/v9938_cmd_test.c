@@ -39,6 +39,14 @@ static void setup_g4(void)
     wreg(1, 0x40); // scherm aan
 }
 
+// Blokcommando's zijn sinds het busy-timingmodel niet meer instant klaar:
+// pomp scanlines (budget-refills) tot de engine idle is.
+static void pump(void)
+{
+    for (int i = 0; ctx.cm != 0 && i < 5000; i++)
+        v9938_scanline(&ctx, 300);
+}
+
 static void cmd(uint8_t sx_lo, uint8_t sx_hi, uint8_t sy_lo, uint8_t sy_hi,
                 uint8_t dx_lo, uint8_t dx_hi, uint8_t dy_lo, uint8_t dy_hi,
                 uint8_t nx_lo, uint8_t nx_hi, uint8_t ny_lo, uint8_t ny_hi,
@@ -48,6 +56,9 @@ static void cmd(uint8_t sx_lo, uint8_t sx_hi, uint8_t sy_lo, uint8_t sy_hi,
     wreg(36, dx_lo); wreg(37, dx_hi); wreg(38, dy_lo); wreg(39, dy_hi);
     wreg(40, nx_lo); wreg(41, nx_hi); wreg(42, ny_lo); wreg(43, ny_hi);
     wreg(44, clr); wreg(45, arg); wreg(46, op);
+    uint8_t c = op >> 4;
+    if ((c >= 0x6 && c <= 0x9) || (c >= 0xC && c <= 0xE))
+        pump(); // blokcommando afmaken; CPU-transfers blijven event-gedreven
 }
 
 // C1: HMMV over de rechterrand clipt (geen wrap naar de linkerkant).
@@ -271,6 +282,25 @@ static void test_sprite_9th_m2(void)
     CHECK((s0 & 0x1F) == 8, "5S-nummer niet 8: %d", s0 & 0x1F);
 }
 
+// C3: een groot commando blijft realistische tijd busy (MAME-budgetmodel).
+static void test_cmd_busy_duration(void)
+{
+    setup_g4();
+    // 200x200-px LMMV rechtstreeks (zonder pump-helper).
+    wreg(36, 0); wreg(37, 0); wreg(38, 0); wreg(39, 0);
+    wreg(40, 200); wreg(41, 0); wreg(42, 200); wreg(43, 0);
+    wreg(44, 9); wreg(45, 0); wreg(46, 0x80);
+    CHECK(rstat(2) & 0x01, "CE laag direct na start van grote LMMV");
+    for (int i = 0; i < 10; i++) v9938_scanline(&ctx, 300);
+    CHECK(rstat(2) & 0x01, "grote LMMV al klaar na 10 scanlines");
+    int lines = 10;
+    while (ctx.cm != 0 && lines < 5000) { v9938_scanline(&ctx, 300); lines++; }
+    CHECK(ctx.cm == 0, "LMMV niet klaar na 5000 lijnen");
+    // 40000 px * 1135 eenheden (NTSC, scherm aan) / 13662 = ~3323 lijnen.
+    CHECK(lines > 3000 && lines < 3700, "busy-duur onverwacht: %d lijnen", lines);
+    CHECK(vram[100 * 128 + 25] == 0x99, "LMMV-vulling incompleet: %02X", vram[100 * 128 + 25]);
+}
+
 int main(void)
 {
     test_hmmv_edge_clip();
@@ -289,6 +319,7 @@ int main(void)
     test_ctrl_write_gate();
     test_sprite_collision_m2();
     test_sprite_9th_m2();
+    test_cmd_busy_duration();
     if (fails) { printf("%d FAILED\n", fails); return 1; }
     printf("alle tests OK\n");
     return 0;

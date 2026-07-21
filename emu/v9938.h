@@ -71,7 +71,9 @@ typedef struct {
     int16_t cny;                           // werk-NY (telt af, MAME-stijl)
     int8_t cdix, cdiy;                     // richting (+1/-1) uit ARG
     uint8_t cmxs, cmxd;                    // ARG bits 4/5: src/dst in expansie-RAM
-    int16_t casx, cadx, canx;              // werk-X-tellers (CPU-transfers)
+    int16_t casx, cadx, canx;              // werk-X-tellers (blok + CPU-transfers)
+    uint8_t cclr;                          // gelatchte kleur (R44 bij start)
+    int32_t cops;                          // engine-budget (13662 eenheden/scanline)
 } v9938_context_t;
 
 void v9938_init(v9938_context_t *ctx, uint8_t *vram128k);
