@@ -151,6 +151,9 @@ static void dump_ppm(const char *path, const uint32_t *fb, int w, int h)
 
 int main(int argc, char **argv)
 {
+#ifdef SDL_MAIN_HANDLED
+    SDL_SetMainReady(); // gelinkt zonder SDL2main (MinGW + VC-libs)
+#endif
     setvbuf(stdout, NULL, _IONBF, 0); // direct loggen (dev)
 
     // Testvlaggen: --slot1/--diska prefillen de menukeuze en slaan het menu

@@ -8,6 +8,8 @@ project(msx_sdl C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# cmake/FindSDL2.cmake vangt SDL2-installaties zonder configbestanden op (scoop)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
 find_package(SDL2 REQUIRED)
 
 set(ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
@@ -58,3 +60,10 @@ target_compile_definitions(msx_sdl PRIVATE
     MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
 
 target_link_libraries(msx_sdl SDL2::SDL2 SDL2::SDL2main)
+
+# Windows: zet SDL2.dll naast de exe zodat hij zonder PATH-aanpassing start
+if(WIN32 AND SDL2_RUNTIME_DLL)
+    add_custom_command(TARGET msx_sdl POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${SDL2_RUNTIME_DLL}" $<TARGET_FILE_DIR:msx_sdl>)
+endif()

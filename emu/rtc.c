@@ -45,7 +45,11 @@ static uint8_t host_time_nibble(uint8_t reg)
 {
     time_t t = time(NULL);
     struct tm tmv;
+#ifdef _WIN32
+    gmtime_s(&tmv, &t); // MinGW/MSVC hebben geen gmtime_r
+#else
     gmtime_r(&t, &tmv);
+#endif
     unsigned year80 = tmv.tm_year >= 80 ? (unsigned)(tmv.tm_year - 80) : 0;
     switch (reg) {
     case 0:  return (uint8_t)(tmv.tm_sec % 10);

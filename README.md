@@ -150,13 +150,38 @@ Drop `build/BareMSX.uf2` onto the Pico in BOOTSEL mode, or flash
 ### Desktop build (SDL2)
 
 For development there is a desktop frontend that reads a `sdcard/` folder
-(same layout) next to the executable, or from `$MSX_SDCARD`:
+(same layout as the SD card above) next to the executable, or from
+`$MSX_SDCARD`. It needs CMake and the SDL2 development libraries
+(`libsdl2-dev` on Debian/Ubuntu, `sdl2` in Homebrew) — the Pico SDK and ARM
+toolchain are *not* required:
 
 ```sh
+sh tools/setup-zeta.sh        # once, if you haven't already
 cmake -S sdl -B sdl/build -DCMAKE_BUILD_TYPE=Release
 cmake --build sdl/build
 ./sdl/build/msx_sdl
 ```
+
+Handy dev flags: `--slot1 game.rom` / `--diska image.dsk` preselect the menu,
+`--nomenu` skips it, and `--frames N --dump out.ppm` runs headless for N
+frames and dumps the screen — useful for scripted VDP regression checks.
+
+#### Windows (scoop)
+
+```powershell
+scoop install mingw cmake ninja extras/sdl2
+sh tools/setup-zeta.sh        # from Git Bash
+cmake -S sdl -B sdl/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build sdl/build
+sdl\build\msx_sdl.exe
+```
+
+Open a *new* terminal after `scoop install` so the updated `PATH` and
+`CMAKE_PREFIX_PATH` are picked up. The scoop `sdl2` package ships the VC
+development libraries without their CMake config files;
+`sdl/cmake/FindSDL2.cmake` compensates, and under MinGW it skips the
+MSVC-built `SDL2main.lib` (the frontend calls `SDL_SetMainReady()` itself).
+`SDL2.dll` is copied next to the exe automatically.
 
 ## Credits
 
