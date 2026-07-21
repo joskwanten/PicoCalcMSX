@@ -18,4 +18,7 @@ int usbkbd_menu_poll(void); // next menu event (menu_input_t) or -1 if none
 // Hotkey: F12 (diskwissel). True precies één keer per druk (clear-on-read).
 bool usbkbd_swap_requested(void);
 
+// Hotkey: F11 (reset naar het bootmenu). Clear-on-read.
+bool usbkbd_reset_requested(void);
+
 #endif // USBKBD_H

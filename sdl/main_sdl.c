@@ -17,6 +17,11 @@
 #endif
 
 #include <stdlib.h>
+#ifdef _WIN32
+#include <process.h> // _spawnv (F11: herstart naar het menu)
+#else
+#include <unistd.h>  // execv (idem)
+#endif
 
 #define MSX_W 256
 #define MSX_H 192
@@ -458,6 +463,22 @@ int main(int argc, char **argv)
                 running = false;
             } else if (e.type == SDL_KEYDOWN && !e.key.repeat) {
                 if (e.key.keysym.scancode == SDL_SCANCODE_F12) { disk_swap_next(); continue; }
+                if (e.key.keysym.scancode == SDL_SCANCODE_F11) {
+                    // Terug naar het bootmenu = zachte reset: herstart het
+                    // proces zonder preselect-vlaggen (Pico-equivalent:
+                    // watchdog-reboot). Scheelt her-init-gymnastiek in de
+                    // machinecode.
+                    fprintf(stderr, "[reset] F11 -> terug naar het menu\n");
+                    SDL_Quit();
+                    char *args[2] = { argv[0], NULL };
+#ifdef _WIN32
+                    _spawnv(_P_NOWAIT, argv[0], (const char *const *)args);
+                    exit(0);
+#else
+                    execv(argv[0], args);
+                    exit(0); // alleen bereikt als execv faalt
+#endif
+                }
                 uint8_t m = sc_to_msx[e.key.keysym.scancode];
                 if (m) machine_keydown(m - 1);
             } else if (e.type == SDL_KEYUP) {

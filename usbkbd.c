@@ -6,12 +6,20 @@
 
 // --- menu-mode navigation event queue ---
 static volatile bool g_menu_mode = false;
-static volatile bool g_swap_req = false; // F12 gezien (clear-on-read)
+static volatile bool g_swap_req = false;  // F12 gezien (clear-on-read)
+static volatile bool g_reset_req = false; // F11 gezien (clear-on-read)
 
 bool usbkbd_swap_requested(void)
 {
     bool r = g_swap_req;
     g_swap_req = false;
+    return r;
+}
+
+bool usbkbd_reset_requested(void)
+{
+    bool r = g_reset_req;
+    g_reset_req = false;
     return r;
 }
 #define MENU_Q 8
@@ -144,10 +152,11 @@ static void process_report(const hid_keyboard_report_t *r)
     diff_mod(prev_mod, r->modifier,
              KEYBOARD_MODIFIER_LEFTALT | KEYBOARD_MODIFIER_RIGHTALT, MSX_GRAPH);
 
-    // Hotkey: F12 = diskwissel (niet in de MSX-matrix).
+    // Hotkeys: F12 = diskwissel, F11 = reset naar menu (niet in de MSX-matrix).
     for (int i = 0; i < 6; i++) {
         uint8_t k = r->keycode[i];
         if (k == HID_KEY_F12 && !contains(prev_kc, k)) g_swap_req = true;
+        if (k == HID_KEY_F11 && !contains(prev_kc, k)) g_reset_req = true;
     }
 
     // Releases: keys in the previous report that are gone now.

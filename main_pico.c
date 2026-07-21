@@ -443,6 +443,10 @@ int main(void)
 #ifdef BAREMSX_SD
         if (usbkbd_swap_requested()) disk_swap_next();
 #endif
+        // F11 = terug naar het bootmenu via een zachte reset (zelfde pad als
+        // de resetknop; de watchdog-scratch bevat geen staging-magic, dus de
+        // herstart boot gewoon het menu).
+        if (usbkbd_reset_requested()) watchdog_reboot(0, 0, 0);
 #endif
 
         uint32_t f_start = video_hstx_frame_count();

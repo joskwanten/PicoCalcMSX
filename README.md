@@ -139,8 +139,9 @@ a real MSX1 (C-BIOS cannot boot disks) — dump one from a machine you own.
 | Esc / Backspace | back |
 
 Pick a ROM for Slot 1, select **Start**. A solid blue screen at boot means no
-SD card (or no BIOS in `system/`) was found. The reset button returns from a
-game to the menu.
+SD card (or no BIOS in `system/`) was found. **F11** returns from a game to
+the menu (a soft reset on the Pico; the SDL build restarts fresh), and so
+does the reset button.
 
 ## Building
 
