@@ -68,13 +68,65 @@ naast de framebuffers in 520KB SRAM).
 4. **Machine**: mapper-RAM, sub-ROM, RTC, lijn-granulaire emulatielus
    (228 T-states/lijn i.p.v. frame-in-één-keer — nodig voor lijn-IRQs),
    machineprofiel-keuze (MSX1/MSX2 o.b.v. system/-inhoud), menu.
-5. **(later) V9958/MSX2+**: bijna een superset van de V9938 — YJK-modes
-   (SCREEN 10-12), horizontale scroll (R#25-R#27), aangepast wait-gedrag;
-   geen extra VRAM. Voorbereiding die we nú al doen: mode-decode op één
-   plek houden en de horizontale startoffset niet hardcoden in de
-   renderers. MAME's v99x8 dekt beide chips (YJK-decode incl. lookup);
-   op de Pico kan zo'n tabel in flash. Vereist een MSX2+-machineprofiel
-   en -BIOS voordat het zin heeft.
+5. **V9958/MSX2+** (uitgewerkt onder "Fase 5" hieronder).
+
+## Fase 5: V9958 / MSX2+
+
+MSX2+ = de **V9958-VDP** (superset van de V9938, géén extra VRAM) plus een
+**MSX2+-machineprofiel** (andere MAIN/SUB-ROM, meestal ingebouwde FM). Nog
+steeds een Z80 — R800/turbo R valt hier NIET onder. MAME's v99x8 dekt beide
+chips (incl. YJK), dus dit is vooral vertaal- en integratiewerk.
+
+### Wat al klaarligt
+
+- V9938-core zit functioneel op MAME-niveau voor SCREEN 0-8
+  (`docs/V9938-MAME-DIFF.md`); de V9958 is grotendeels additief.
+- **R#25-R#27 worden al opgeslagen en gemaskeerd** (v9938.c `reg_mask`:
+  0x7F/0x3F/0x07) — de scroll/YJK-registers doen alleen nog niets.
+- Mode-decode op één plek (`v_mode`), horizontale offset niet hardcoded.
+- MAME als kopieerbare BSD-3-referentie; `mode_graphic4` toont de
+  R#25/26/27-scrollogica al kant-en-klaar.
+
+### Voorwerk (openstaande V9938-punten die MSX2+-software óók raakt)
+
+Uit `docs/V9938-MAME-DIFF.md`, vóór de V9958-modes zinvol zijn:
+- **Interlace / EO-paginawissel** (R#9 IL/EO) — 512×424 en page-flip-trucs.
+- **R#18 set-adjust** — beeldcentrering/schud-effecten.
+(T2-blink, G6/G7-interleave en MC/SCREEN 3 mogen later; niet blokkerend.)
+
+### VDP-werk (V9958)
+
+a. **Horizontale scroll** — R#26 (byte, 8-px) + R#27 (dot, 0-7) + de
+   "mask left 8 pixels"-bit in R#25. Breed gebruikt, relatief goedkoop;
+   MAME's mode-renderers laten het exact zien. Eerste zichtbare stap.
+b. **YJK-modes** (SCREEN 10/11/12) — de hoofdmoot: Y/J/K-decode
+   (19268 kleuren), nieuwe renderpaden, YJK+YAE-menging, spritegedrag.
+   MAME heeft de decode-lookup kant-en-klaar.
+c. **Versie-ID in het statusregister** zodat software de V9958 herkent
+   (anders valt ze terug op V9938-gedrag).
+
+### Machine-werk
+
+d. **MSX2+-profiel** — de huidige tweeweg-autodetectie (MSX1 vs MSX2 op
+   `msx2*`/`msx2ext*` in `system/`) uitbreiden naar drie profielen, met de
+   MSX2+-MAIN/SUB-ROM en de slotlayout van een echte machine (bijv.
+   Panasonic FS-A1WX). Bescheiden werk.
+e. **Ingebouwde MSX-MUSIC (YM2413/OPLL)** — standaard op MSX2+, nog niet
+   aanwezig (we hebben alleen emu2149/PSG). Permissieve core: **emu2413**
+   (zelfde auteur als emu2149, MIT). Machine boot er zonder; aparte klus.
+
+### Pico-aandachtspunt
+
+Geen extra VRAM, dus geen nieuwe geheugendruk t.o.v. MSX2-op-Pico (dat
+sowieso op PSRAM wacht). Wél: **YJK-decode is per-pixel rekenzwaar** en het
+beam-budget is krap (~63 µs/lijn). MAME's decode-tabel kan in flash; of het
+binnen het budget past is de enige echte openstaande performancevraag — en
+speelt alléén op de Pico, niet op SDL.
+
+### Aanbevolen volgorde
+
+Voorwerk (interlace, R#18) → horizontale scroll (a) → YJK (b) + versie-ID
+(c) → MSX2+-profiel/BIOS (d) → OPLL/FM (e, optioneel).
 
 ## Architectuurbeslissingen
 
