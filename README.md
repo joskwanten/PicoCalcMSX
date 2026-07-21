@@ -118,6 +118,18 @@ on VSYS alone is not enough.
 In `system/`, the first file whose name starts with `disk` is used as the
 DISK.ROM; the first other file is the MSX BIOS.
 
+> **How many files per folder?** The boot menu lists at most **128 files**
+> per folder — any beyond that are simply not shown. On the **Pico** there's
+> a stricter practical limit of **64 files** in `roms/` (and in `dsk/`):
+> booting a ROM too big for RAM (>40 KB — most Konami SCC games) stages it to
+> flash across a reboot, and that path only re-scans the first 64 directory
+> entries, so a large ROM listed past #64 won't boot. The SDL desktop build
+> isn't affected by the 64 limit (only the 128 display cap). Listings are in
+> raw filesystem order, not sorted — use type-to-find in the menu to jump
+> straight to a title. (The menu browses `roms/` and `dsk/` directly and
+> doesn't descend into subfolders, so keep the files you want to boot in
+> those folders and trim the rest.)
+
 > **Recommended combo for disk support: a Philips VG-8020 BIOS + the
 > VY-0010 disk ROM.** That pairing is a genuine 1985 Dutch MSX1 setup
 > (the VY-0010 was *the* external drive for these machines), and both
