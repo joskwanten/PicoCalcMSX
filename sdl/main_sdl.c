@@ -282,6 +282,8 @@ int main(int argc, char **argv)
                 switch (e.key.keysym.scancode) {
                 case SDL_SCANCODE_UP:     menu_input(MENU_UP); break;
                 case SDL_SCANCODE_DOWN:   menu_input(MENU_DOWN); break;
+                case SDL_SCANCODE_PAGEUP:   menu_input(MENU_PGUP); break;
+                case SDL_SCANCODE_PAGEDOWN: menu_input(MENU_PGDN); break;
                 case SDL_SCANCODE_RETURN:
                 case SDL_SCANCODE_KP_ENTER:
                 case SDL_SCANCODE_SPACE:  menu_input(MENU_ENTER); break;

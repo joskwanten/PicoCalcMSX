@@ -134,6 +134,7 @@ a real MSX1 (C-BIOS cannot boot disks) — dump one from a machine you own.
 | Key | Action |
 |-----|--------|
 | ↑ / ↓ | navigate |
+| PgUp / PgDn | jump a page through the file list |
 | Enter / Space | select / open browser |
 | Esc / Backspace | back |
 

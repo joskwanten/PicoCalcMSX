@@ -21,6 +21,8 @@ typedef enum {
     MENU_DOWN,
     MENU_ENTER,
     MENU_BACK,
+    MENU_PGUP,  // een lijstpagina omhoog (browse)
+    MENU_PGDN,  // een lijstpagina omlaag (browse)
 } menu_input_t;
 
 // `bios` is the loaded BIOS image (used for its 8x8 character font via CGTABL).

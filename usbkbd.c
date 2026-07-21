@@ -30,6 +30,8 @@ static void menu_key(uint8_t hid)
     switch (hid) {
     case 0x52: ev = MENU_UP; break;                 // Up
     case 0x51: ev = MENU_DOWN; break;               // Down
+    case 0x4B: ev = MENU_PGUP; break;               // Page Up
+    case 0x4E: ev = MENU_PGDN; break;               // Page Down
     case 0x28: case 0x58: case 0x2C: ev = MENU_ENTER; break; // Enter, KP-Enter, Space
     case 0x29: case 0x2A: ev = MENU_BACK; break;    // Esc, Backspace
     default: break;

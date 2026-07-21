@@ -106,6 +106,8 @@ static void render_main(uint16_t *fb)
     draw_text(fb, 2, 22, "up/dn  enter=pick  esc=clear", COL_DIM, COL_BG);
 }
 
+#define BROWSE_ROWS 18 // zichtbare lijstregels (rows 3..20); ook de pgup/pgdn-stap
+
 static void render_browse(uint16_t *fb)
 {
     fill_screen(fb, COL_BG);
@@ -113,14 +115,13 @@ static void render_browse(uint16_t *fb)
     snprintf(title, sizeof title, "-- %s --", g_dir);
     draw_text(fb, 3, 1, title, COL_TITLE, COL_BG);
 
-    const int visible = 18; // rows 3..20
     if (g_bsel < g_btop) g_btop = g_bsel;
-    if (g_bsel >= g_btop + visible) g_btop = g_bsel - visible + 1;
+    if (g_bsel >= g_btop + BROWSE_ROWS) g_btop = g_bsel - BROWSE_ROWS + 1;
 
     if (g_list_n == 0)
         draw_text(fb, 3, 3, "(no files)", COL_DIM, COL_BG);
 
-    for (int i = 0; i < visible && (g_btop + i) < g_list_n; i++) {
+    for (int i = 0; i < BROWSE_ROWS && (g_btop + i) < g_list_n; i++) {
         int idx = g_btop + i;
         int row = 3 + i;
         bool sel = (idx == g_bsel);
@@ -128,7 +129,7 @@ static void render_browse(uint16_t *fb)
         draw_text(fb, 2, row, g_list[idx].name, sel ? COL_SEL_TEXT : COL_TEXT, sel ? COL_SEL_BG : COL_BG);
     }
 
-    draw_text(fb, 2, 22, "enter=select  esc=cancel", COL_DIM, COL_BG);
+    draw_text(fb, 2, 22, "pgup/dn enter=select esc=cancel", COL_DIM, COL_BG);
 }
 
 void menu_render(uint16_t *fb)
@@ -178,11 +179,22 @@ void menu_input(menu_input_t in)
                 t[0] = 0;
             }
             break;
+        default:
+            break; // pgup/pgdn: alleen zinvol in de browse-lijst
         }
     } else { // MODE_BROWSE
         switch (in) {
         case MENU_UP:   if (g_bsel > 0) g_bsel--; break;
         case MENU_DOWN: if (g_bsel + 1 < g_list_n) g_bsel++; break;
+        case MENU_PGUP:
+            g_bsel = (g_bsel > BROWSE_ROWS) ? g_bsel - BROWSE_ROWS : 0;
+            break;
+        case MENU_PGDN:
+            if (g_list_n > 0) {
+                g_bsel += BROWSE_ROWS;
+                if (g_bsel >= g_list_n) g_bsel = g_list_n - 1;
+            }
+            break;
         case MENU_ENTER:
             if (g_list_n > 0) {
                 snprintf(g_target, STORAGE_MAX_NAME, "%s", g_list[g_bsel].name);
