@@ -59,6 +59,69 @@ Still open on the V9938:
 Other current limitations: Disk B is UI-only, and a slot 2 cartridge and
 the disk drive can't be used at the same time (slot 2 is shared).
 
+### Open: krakend geluid op de Pico bij PSG-muziek (Aleste)
+
+Aleste's PSG-muziek kraakt op de Pico/HDMI, terwijl exact dezelfde
+emulatie in de SDL-build schoon klinkt. Uitgebreid geanalyseerd
+(juli 2026) — wat er allemaal is UITGESLOTEN, met meting:
+
+- **Buffer-underruns**: sample-ring nooit droog, DI-queue voegt nooit
+  stilte in, geluidsschrijf-wachtrij verliest niets (alle tellers 0
+  tijdens hoorbaar kraken).
+- **Sample-corruptie**: 2e-afgeleide-spikedetectors op zowel de
+  schrijf- als de leeskant van de sample-ring vangen niets (drempel
+  boven de SDL-referentie); 0,26s-captures op de Pico zijn schoon.
+- **Clipping/DC**: de mix clipte wel degelijk (emu2149 piekt op ~12240,
+  niet ~765 — de oude PSG_GAIN=8 zat 3x over de rail) en was unipolair;
+  gefixt met een DC-blocker + herijkte gains (0,000% clipping, gemeten).
+  Het kraken bleef, en blijkt volume-onafhankelijk (-18dB: kraken even
+  luid) — het is dus geen signaalvervorming maar een artefact met vaste
+  luidheid (TV-mute/pakket-afkeuring?).
+- **CPU-last op core 1**: testtoon mét volledige synthese-last ernaast
+  (aud_test_tone=2) is schoon.
+- **Encodeertabellen**: TERC4-tabel klopt met de HDMI-spec, BCH-tabel is
+  lineair en exact CRC8-poly 0x83, parity-tabel correct; RAM-kopieën
+  identiek aan de ELF (geen corruptie). Push/pop van de DI-queue is in
+  de disassembly correct geordend.
+- **Island-uniciteit**: een toon met LSB-wobble (elk island uniek,
+  audio onhoorbaar anders) is schoon.
+- **Channel-status**: overgeschakeld naar de _cs-variant (48kHz correct
+  gedeclareerd i.p.v. alles-nul/"44,1kHz") — geen verschil.
+
+Wat het kraken WEL triggert: signalen met veel verschillende
+samplewaarden (PSG-muziek, ruis — ook zachte ruis); wat schoon blijft:
+blokgolven op 444Hz en 12kHz, stilte, en de LSB-wobble-toon.
+
+Vervolgonderzoek (per-kanaal, zelfde avond):
+
+- Solo-kanaal-A (dbg_snd_mask via SWD): een "dubstep-achtige" wobbel
+  per kanaal op de Pico; hetzelfde kanaal solo in SDL (--sndmask 6) is
+  SCHOON. Elk kanaal lijkt z'n eigen wobbel te hebben.
+- Low-pass op de mix (dbg_snd_lpf, 2-pole 7,6kHz): wobbel blijft — dus
+  in-band, geen weergegeven ultrasone aliasing.
+- Geluidsschrijf-wachtrij omzeild (writes direct van core 0):
+  onveranderd — de wachtrij-timing is het niet. De wachtrij is daarna
+  weer VERWIJDERD (writes gaan direct; losse bytes zijn atomair en het
+  µs-transient is als echte hardware — scheelt een hoop complexiteit).
+- **emu2149 definitief vrijgesproken**: deterministische selftest
+  (tools/psg_selftest.c op de host + aud_test_tone=7 op de Pico, zelfde
+  registers vanaf reset) — output byte-voor-byte IDENTIEK over 12020
+  samples.
+
+Conclusie tot nu toe: transport, belasting, wachtrij én synthese zijn
+allemaal uitgesloten. De resterende verdachte is de
+**registerwrite-stroom zelf**: de emulatie (Z80-/interrupt-cadans) op
+de Pico voedt Aleste's muziekdriver kennelijk nét anders dan SDL.
+
+Volgende stap: op beide platforms de PSG-registerwrites loggen
+((frame, reg, val)-stroom) tijdens dezelfde passage en die diffen —
+verschilt de stroom, dan zit de bug in de emulatietiming, niet in
+audio. Debug-instrumentatie zit er nog in (uit standaard): testtonen
+(`aud_test_tone` 1-7), verzwakker (`aud_att`), kanaalmasker
+(`dbg_snd_mask`), low-pass (`dbg_snd_lpf`), spike-tellers en de
+capturebuffer (`aud_cap`/`aud_cap_pos`) — alles via SWD (adressen via
+`arm-none-eabi-nm BareMSX.elf`).
+
 ## Hardware
 
 Everything hangs off a stock **Pico 2** (or another RP2350 board, e.g. the
