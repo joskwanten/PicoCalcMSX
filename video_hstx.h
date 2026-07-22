@@ -15,6 +15,11 @@
 
 #define VHSTX_MSX_W 256
 #define VHSTX_MSX_H 192
+// Aantal lijnslots in de scanout-ring (zie video_hstx.c). De beam-lus in
+// main_pico gebruikt dit voor de cross-frame-pacing: nieuwe lijn ln deelt z'n
+// slot met oude lijn (ln mod VHSTX_RING_N)-genoten en mag die pas overschrijven
+// als de display eroverheen is.
+#define VHSTX_RING_N 24
 
 // Lijnbron: vul dst met de RGB565-pixels van MSX-lijn `line`; schrijf de
 // breedte (256 of 512) in *w. Draait op CORE 1, vlak vóór de scanout —

@@ -115,10 +115,8 @@ static void menu_line_source(uint16_t *dst, int line, int *w)
     *w = MSX_W;
 }
 
-// Pacing-telemetrie (SWD-uitleesbaar): waar wacht de hoofdlus en wat ziet hij?
-volatile int dbg_pace_ln = -99, dbg_pace_scan = -99;
 volatile uint32_t dbg_core0_frames = 0;
-volatile uint32_t dbg_overruns = 0; // frame-flank gemist (emulatie te laat klaar)
+volatile uint32_t dbg_overruns = 0; // >1 display-flip per emulatieframe (te traag)
 // XIP-integriteit: som van de eerste 4KB van het (gestagede) game-ROM,
 // per frame herberekend; mismatches tellen = runtime-XIP-corruptie.
 volatile uint32_t dbg_xip_ref = 0, dbg_xip_bad = 0, dbg_xip_checks = 0;
@@ -170,6 +168,7 @@ int main(void)
     bool boot_msx2 = false;      // beide msx2*-bestanden in system/ aanwezig
     uint32_t msx2ext_size = 0;   // sub-ROM-grootte (staat op sd_bios+32K)
     static menu_config_t cfg;
+    cfg.mapper1 = -1; // auto-detect (menu kan overrulen; staged-boot houdt auto)
     static storage_entry_t ent[64];
     bool sd_ok = storage_init();
     const uint8_t *staged_game = NULL;
@@ -407,6 +406,9 @@ int main(void)
     }
 
     bool init_ok;
+#ifdef BAREMSX_SD
+    machine_set_mapper_override(cfg.mapper1); // menu: slot 1-mapper (of -1 auto)
+#endif
 #if defined(BAREMSX_SD) && defined(BAREMSX_MSX2)
     if (boot_msx2)
         init_ok = machine_init_msx2(use_bios, use_bios_size,
@@ -452,31 +454,58 @@ int main(void)
         uint32_t f_start = video_hstx_frame_count();
 
         // Eén MSX-frame: elke zichtbare lijn wordt geëmuleerd en meteen in de
-        // ring gerenderd, gepaced op de scanout (max ~20 lijnen vooruit, past
-        // in de 24-slots ring). De pacing-wachttijd benutten we voor audio.
+        // ring gerenderd, gepaced op de scanout (max ~20 lijnen vooruit, past in
+        // de 24-slots ring). Audio-synthese draait NIET meer hier: die zit op
+        // core 1 (pipeline_task), zodat core 0 puur emuleert+rendert. Anders
+        // werd bij zware games (Aleste/Zanac) de ~735 samples/frame synthese de
+        // vblank in geperst en overrunde core 0 de frame-naad -> stale toplijnen.
+        // Emuleer het VOLLEDIGE frame (262 NTSC / 313 PAL): een PAL-game (Zanac,
+        // Aleste) zet z'n split-ISR in de vblank op — kap je die af op 262, dan
+        // mist de line-interrupt-bewapening en breekt de score-split intermittent.
+        int frame_lines = machine_frame_lines();
         video_hstx_set_border(machine_border_565());
-        for (int ln = 0; ln < 262; ln++) {
+        for (int ln = 0; ln < frame_lines; ln++) {
             if (ln < vis_h) {
-                while (video_hstx_scan_msx_line() < ln - 20) {
-                    extern volatile int dbg_pace_ln, dbg_pace_scan;
-                    dbg_pace_ln = ln;
-                    dbg_pace_scan = video_hstx_scan_msx_line();
+                // Cross-frame-gate: een emulatieframe begint terwijl de display
+                // nog de ONDERKANT van het vorige frame scant (meting: scan
+                // ~205 bij frame-start). De in-frame-pacing hieronder helpt dan
+                // niet — de scanpositie clampt op vis_h in de onderborder,
+                // waardoor elke wachtvoorwaarde slaagt en lijn 24+ de ring-
+                // slots van net gerenderde lijn 0..7 overschreef vóór de
+                // display ze scande (= de jitterende toplijnen in Quarth).
+                // Regel: zolang de display-frameteller nog niet geflipt is,
+                // mag lijn ln pas de ring in als de OUDE bewoner van z'n slot
+                // (grootste oude lijn == ln mod RING_N) al gescand is; lijnen
+                // >= RING_N wachten sowieso op de flip.
+                int old_line = ln + VHSTX_RING_N * ((vis_h - 1 - ln) / VHSTX_RING_N);
+                while (video_hstx_frame_count() == f_start &&
+                       (ln >= VHSTX_RING_N ||
+                        video_hstx_scan_msx_line() <= old_line)) {
 #ifdef BAREMSX_USB_KEYBOARD
                     usbkbd_task();
 #endif
-                    audio_hdmi_generate_burst(16);
+                    tight_loop_contents();
+                }
+                // In-frame-pacing (na de flip): max ~20 lijnen voor de beam uit.
+                while (video_hstx_frame_count() != f_start &&
+                       video_hstx_scan_msx_line() < ln - 20) {
+#ifdef BAREMSX_USB_KEYBOARD
+                    usbkbd_task();
+#endif
+                    tight_loop_contents();
                 }
             }
-            machine_do_line(ln);
+            // Renderen VÓÓR de Z80-slice van deze lijn — met de registerstand
+            // van de lijnSTART, zoals de SDL-sink en echte hardware (die latcht
+            // per lijn). Renderen ná de slice liet een mid-lijn R23/R2-write
+            // (Zanac's veld-switch op lijn 14) één lijn te vroeg doorwerken:
+            // de onderste scorelijn toonde al scrollend veld.
             if (ln < vis_h) {
                 int w = machine_render_line_565(video_hstx_claim_line(ln), ln);
                 video_hstx_publish_line(ln, w);
-            } else if ((ln & 15) == 15) {
-                audio_hdmi_generate_burst(256);
             }
+            machine_do_line(ln);
         }
-
-        audio_hdmi_generate();   // restje van dit frame
 
         dbg_core0_frames++;
         emu_frames++;
@@ -485,21 +514,14 @@ int main(void)
             if (xip_sum(dbg_xip_ptr) != dbg_xip_ref) dbg_xip_bad++;
         }
 
-        if (video_hstx_frame_count() != f_start) dbg_overruns++;
+        // De display-flip valt bewust MIDDEN in het emulatieframe (lijn >=
+        // RING_N wacht erop), dus één flip per frame is de norm. Meer dan één
+        // flip = de emulatie hield het tempo niet bij (echte overrun).
+        if (video_hstx_frame_count() - f_start > 1) dbg_overruns++;
 
-        // Frame-flank afwachten — maar ALLEEN als we nog in het displayframe
-        // zitten waarin we begonnen. De vblank-staart (50 lijnen emulatie +
-        // audio-top-up) valt na de laatste gepacete lijn in ~0,9 ms; loopt
-        // die nét uit, dan zou een onvoorwaardelijke wait een heel frame
-        // overslaan en de emulatie hard op 30 fps klemmen. Bij een gemiste
-        // flank dus meteen door: de per-lijn-pacing hierboven lijnt het
-        // volgende frame vanzelf weer uit.
-        while (video_hstx_frame_count() == f_start) {
-#ifdef BAREMSX_USB_KEYBOARD
-            usbkbd_task();
-#endif
-            tight_loop_contents();
-        }
+        // Geen aparte flank-wait meer nodig: de cross-frame-gate bovenin het
+        // volgende frame (lijn 0 wacht tot z'n slot vrij is, lijn >= RING_N op
+        // de flip) verzorgt de pacing volledig.
 
         // Eens per seconde: emulatie-fps + display-fps
         // NB: geen per-seconde fps-printf meer — stdio (UART/USB) stalt core 0

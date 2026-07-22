@@ -8,6 +8,7 @@
 #include <stdio.h>
 
 #include "machine.h"
+#include "mapper.h"
 #include "storage.h"
 #include "zip.h"
 #include "menu.h"
@@ -164,6 +165,8 @@ int main(int argc, char **argv)
     // Testvlaggen: --slot1/--diska prefillen de menukeuze en slaan het menu
     // over; --frames N + --dump pad = headless draaien en het scherm dumpen.
     const char *arg_slot1 = NULL, *arg_slot2 = NULL, *arg_diska = NULL, *arg_dump = NULL;
+    const char *arg_audcap = NULL;
+    const char *arg_mapper = NULL; // auto/plain/konami/ascii8/ascii16/scc (slot 1)
     const char *arg_glitch = NULL;
     int arg_frames = 0, arg_press = 0, arg_trace_from = 0, arg_trace_to = 0;
     bool arg_nomenu = false;
@@ -171,6 +174,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--slot1") && i + 1 < argc) arg_slot1 = argv[++i];
         else if (!strcmp(argv[i], "--slot2") && i + 1 < argc) arg_slot2 = argv[++i];
         else if (!strcmp(argv[i], "--diska") && i + 1 < argc) arg_diska = argv[++i];
+        else if (!strcmp(argv[i], "--mapper") && i + 1 < argc) arg_mapper = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) arg_frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) arg_dump = argv[++i];
         else if (!strcmp(argv[i], "--press") && i + 1 < argc) arg_press = atoi(argv[++i]);
@@ -178,6 +182,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--trace") && i + 2 < argc) {
             arg_trace_from = atoi(argv[++i]);
             arg_trace_to = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--audcap") && i + 1 < argc) arg_audcap = argv[++i];
+        else if (!strcmp(argv[i], "--sndmask") && i + 1 < argc) {
+            extern volatile uint32_t dbg_snd_mask;
+            dbg_snd_mask = (uint32_t)atoi(argv[++i]); // bit0-2=PSG A/B/C, bit3=SCC
         }
         else if (!strcmp(argv[i], "--nomenu")) arg_nomenu = true;
     }
@@ -279,6 +288,14 @@ int main(int argc, char **argv)
     if (arg_slot1) snprintf(cfg.slot1, sizeof cfg.slot1, "%s", arg_slot1);
     if (arg_slot2) snprintf(cfg.slot2, sizeof cfg.slot2, "%s", arg_slot2);
     if (arg_diska) snprintf(cfg.diskA, sizeof cfg.diskA, "%s", arg_diska);
+    if (arg_mapper) {
+        cfg.mapper1 = !strcmp(arg_mapper, "plain")    ? MAPPER_PLAIN
+                    : !strcmp(arg_mapper, "konami")   ? MAPPER_KONAMI
+                    : !strcmp(arg_mapper, "ascii8")   ? MAPPER_ASCII8
+                    : !strcmp(arg_mapper, "ascii16")  ? MAPPER_ASCII16
+                    : !strcmp(arg_mapper, "scc")      ? MAPPER_KONAMI_SCC
+                    : -1; // "auto" of onbekend
+    }
     while (!arg_nomenu && !menu_start_requested()) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -378,6 +395,7 @@ int main(int argc, char **argv)
 
     static uint8_t vram128k[V9938_VRAM_SIZE];
     static uint8_t sccplus_ram[65536];
+    machine_set_mapper_override(cfg.mapper1); // menu/CLI: slot 1-mapper (of -1)
     bool ok = msx2
         ? machine_init_msx2(bios, sizeof bios, ext_rom, sizeof ext_rom, game, game_size, vram128k, sccplus_ram)
         : machine_init(bios, sizeof bios, game, game_size, game2, game2_size);
@@ -463,10 +481,12 @@ int main(int argc, char **argv)
         frame_no++;
         if (arg_frames > 0 && frame_no % 30 == 0)
             fprintf(stderr, "[trace] frame=%d pc=%04X\n", frame_no, machine_dbg_pc());
-        // Testinjectie: spatie indrukken op frame N (10 frames lang).
+        // Testinjectie: spatie-pulsen vanaf frame N (elke 120 frames), om
+        // headless door titel/menu's heen in gameplay te komen.
         if (arg_press > 0) {
-            if (frame_no == arg_press) machine_keydown(64);      // MSX-matrix: spatie
-            if (frame_no == arg_press + 10) machine_keyup(64);
+            int ph = (frame_no - arg_press) % 120;
+            if (frame_no >= arg_press && ph == 0) machine_keydown(64);
+            if (frame_no >= arg_press && ph == 8) machine_keyup(64);
         }
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -555,6 +575,14 @@ int main(int argc, char **argv)
 
         // Audio: queue one frame, but don't let the queue build unbounded latency.
         machine_get_audio(audio, AUDIO_SAMPLES_PER_FRAME * 2);
+        // Debug: ruwe mono-samples naar bestand (vergelijk met de Pico-capture).
+        if (arg_audcap) {
+            static FILE *acf = NULL;
+            if (!acf) acf = fopen(arg_audcap, "wb");
+            if (acf)
+                for (int i = 0; i < AUDIO_SAMPLES_PER_FRAME; i++)
+                    fwrite(&audio[i * 2], 2, 1, acf);
+        }
         if (SDL_GetQueuedAudioSize(adev) < AUDIO_SAMPLE_RATE) // < ~0.25 s buffered
             SDL_QueueAudio(adev, audio, sizeof(audio));
 

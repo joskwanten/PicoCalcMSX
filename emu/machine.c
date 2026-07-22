@@ -72,6 +72,17 @@ static mappedram_t mapram;
 static sccplus_t sccplus; // Sound Cartridge in slot 2 (alleen met host-RAM)
 #endif
 
+// Totaal aantal scanlijnen per frame: 262 (NTSC/60Hz) of 313 (PAL/50Hz, R9
+// bit1). De Pico-beam-lus moet het HELE frame emuleren, anders wordt de vblank
+// van een PAL-game afgekapt en breekt de split-ISR-timing (zie main_pico.c).
+int machine_frame_lines(void)
+{
+#ifdef BAREMSX_MSX2
+    if (g_msx2) return (v9938.regs[9] & 0x02) ? 313 : 262;
+#endif
+    return 262;
+}
+
 void machine_attach_disk(const uint8_t *disk_rom, uint32_t disk_rom_size,
                          uint8_t sides, uint32_t total_sectors,
                          void *io_ctx, wd_sector_io_t io)
@@ -88,7 +99,37 @@ void machine_disk_swap(uint8_t sides, uint32_t total_sectors)
         wd2793_set_disk(&diskrom.fdc, sides, total_sectors);
 }
 
+// Slot 1-mapper-override uit het menu: -1 = auto-detect, anders forceer een
+// MAPPER_*-type. Eenmalig (per machine_init) — geldt alleen voor slot 1.
+static int g_mapper_ovr = -1;
+void machine_set_mapper_override(int type) { g_mapper_ovr = type; }
+
 uint8_t psg_register = 0;
+
+// Debug (SWD): geluidskanalen muten — bit0/1/2 = PSG A/B/C, bit3 = SCC.
+volatile uint32_t dbg_snd_mask = 0;
+// Debug (SWD): low-pass op de mix (0=uit, 1/2 = aantal 7,6kHz-polen).
+volatile uint32_t dbg_snd_lpf = 0;
+
+// Deterministische emu2149-selftest (audio_hdmi toon-modus 7): eigen
+// PSG-instantie, vaste registers, exact dezelfde configuratie als de echte
+// init hierboven — output moet byte-voor-byte gelijk zijn aan de host-run.
+int16_t emu2149_selftest_sample(void)
+{
+    static PSG *tp = NULL;
+    if (!tp) {
+        tp = PSG_new(3579545, AUDIO_SAMPLE_RATE);
+        if (!tp) return 0;
+        PSG_setVolumeMode(tp, EMU2149_VOL_AY_3_8910);
+        PSG_set_quality(tp, 0);
+        PSG_reset(tp);
+        PSG_writeReg(tp, 0, 0xF7); // toonperiode A = 0x1F7 (~444Hz)
+        PSG_writeReg(tp, 1, 0x01);
+        PSG_writeReg(tp, 7, 0x3E); // mixer: alleen toon A
+        PSG_writeReg(tp, 8, 0x0F); // volume A = 15
+    }
+    return PSG_calc(tp);
+}
 
 #ifdef SCC_DEBUG
 volatile uint16_t scc_log_a[64], scc_log_pc[64];
@@ -245,7 +286,9 @@ bool machine_init(const uint8_t *bios, uint32_t bios_size,
     // Primaire slots
     slots_add_slot(&slots, 0, (void *)bios, rom_read, rom_write);       // BIOS
 
-    mapper_type_t mt = mapper_detect(game, game_size);
+    mapper_type_t mt = (g_mapper_ovr >= 0) ? (mapper_type_t)g_mapper_ovr
+                                           : mapper_detect(game, game_size);
+    g_mapper_ovr = -1; // eenmalig; slot 2 detecteert altijd automatisch
     printf("[machine] cartridge mapper: %s (%u bytes)\n", mapper_name(mt), (unsigned)game_size);
     if (mt == MAPPER_KONAMI_SCC) {
         scc_set_rom(&konami_scc, (uint8_t *)game, game_size);
@@ -365,6 +408,7 @@ void __not_in_flash_func(machine_do_line)(int line)
             t19 = v9938.regs[19]; t23 = v9938.regs[23];
             ts1 = v9938.status[1]; tirq = v9938_irq_asserted(&v9938);
         }
+        v9938_line_start(&v9938); // R19/R23-latch voor de coïncidentie-check
         z80_run(&cpu, 228);
         v9938_scanline(&v9938, line);
         if (machine_trace) {
@@ -470,7 +514,9 @@ bool machine_init_msx2(const uint8_t *bios, uint32_t bios_size,
 
     slots_add_slot(&slots, 0, (void *)bios, rom_read, rom_write);
 
-    mapper_type_t mt = mapper_detect(game, game_size);
+    mapper_type_t mt = (g_mapper_ovr >= 0) ? (mapper_type_t)g_mapper_ovr
+                                           : mapper_detect(game, game_size);
+    g_mapper_ovr = -1; // eenmalig; slot 2 detecteert altijd automatisch
     printf("[machine] msx2: cartridge mapper: %s (%u bytes)\n", mapper_name(mt), (unsigned)game_size);
     if (mt == MAPPER_KONAMI_SCC) {
         scc_set_rom(&konami_scc, (uint8_t *)game, game_size);
@@ -591,22 +637,51 @@ static inline int16_t clamp16(int32_t v)
     return (int16_t)v;
 }
 
-// Mix-balans (twee knoppen) + master-volume tegen oversturing.
-// emu2149 geeft ~0..765; de SCC zit bij games vaak op bescheiden volumes.
-#define PSG_GAIN 8
-#define SCC_GAIN 2
-#define MASTER_NUM 3   // totaal op 75% voor headroom
-#define MASTER_DEN 4
+// Mix-balans. GEMETEN (Aleste, alle 3 PSG-kanalen vol): emu2149 piekt op
+// ~12240 — de kanaal-accumulator is een IIR (ch_out = (ch_out+voltbl<<4)>>1,
+// convergeert naar 4080/kanaal), geen 0..765 zoals eerder aangenomen. De oude
+// PSG_GAIN=8 kwam dan op ~98k = 3x over de int16-rail: harde clipping =
+// "kraken" bij luide muziek (macOS maskeerde het; de DC-gekoppelde
+// HDMI-keten niet). Nu: PSG effectief x2,5 (piek 30600, net onder de rail),
+// SCC x0,625 — zelfde 4:1-balans als de oude 8:2.
+#define PSG_NUM 20
+#define SCC_NUM 5
+#define MIX_DEN 8
 
 // Genereer `len` interleaved stereo int16-samples (AY-3-8910 + Konami SCC).
 // De MSX-PSG is mono, dus links == rechts.
 void __not_in_flash_func(machine_get_audio)(int16_t *chunk, uint32_t len)
 {
+    // De audiosynthese draait op core 1 en start al tijdens het bootmenu — vóór
+    // machine_init psg via PSG_new aanmaakt. Dan stilte i.p.v. een NULL-deref.
+    if (!psg) {
+        for (uint32_t i = 0; i < len; i++) chunk[i] = 0;
+        return;
+    }
+    // Debug (SWD): PSG-kanaalmasker — bit0/1/2 = kanaal A/B/C muten, bit3 =
+    // SCC muten. Voor het isoleren van het "niet lekker" klinkende kanaal.
+    extern volatile uint32_t dbg_snd_mask;
+    extern volatile uint32_t dbg_snd_lpf; // 0=uit, 1=1-pole ~7,6kHz, 2=2-pole
+    psg->mask = dbg_snd_mask & 7;
+
+    // DC-blocker (one-pole high-pass, fc ~2Hz). De PSG-uitgang is UNIPOLAIR
+    // (0..~12240): zonder dit rijdt de mix op een grote DC-offset de
+    // DC-gekoppelde HDMI-keten in en halveert de bruikbare headroom.
+    // Centreren geeft symmetrische pieken; de clamp blijft vangnet.
+    static int32_t hp_x1 = 0, hp_y1 = 0;
     for (uint32_t i = 0; i < len; i += 2) {
         int32_t psg_out = PSG_calc(psg);
-        int32_t scc = scc_process(&konami_scc);
-        int32_t mix = (psg_out * PSG_GAIN + scc * SCC_GAIN) * MASTER_NUM / MASTER_DEN;
-        int16_t s = clamp16(mix);
+        int32_t scc = (dbg_snd_mask & 8) ? 0 : scc_process(&konami_scc);
+        int32_t x = (psg_out * PSG_NUM + scc * SCC_NUM) / MIX_DEN;
+        int32_t y = x - hp_x1 + hp_y1 - (hp_y1 >> 12); // y += (x-x1) - y1/4096
+        hp_x1 = x;
+        hp_y1 = y;
+        // Optionele low-pass (à la het RC-uitgangsfilter van echte MSX'en):
+        // one-pole y += (x-y)/2 per trap, fc ≈ 7,6kHz @ 48kHz.
+        static int32_t lp1 = 0, lp2 = 0;
+        if (dbg_snd_lpf >= 1) { lp1 += (y - lp1) >> 1; y = lp1; }
+        if (dbg_snd_lpf >= 2) { lp2 += (y - lp2) >> 1; y = lp2; }
+        int16_t s = clamp16(y);
         chunk[i]     = s;
         chunk[i + 1] = s;
     }

@@ -177,6 +177,16 @@ static void __not_in_flash_func(reg_write)(v9938_context_t *ctx, int n, uint8_t 
         // A16-A14 van de actieve pointer (§4.1).
         ctx->vram_addr = (ctx->vram_addr & 0x3FFF) | (((uint32_t)v & 7) << 14);
         break;
+    case 19:
+    case 23:
+        // Verse R19/R23: de eerstvolgende 2 lijnchecks niet laten vuren.
+        // Een split-ISR schrijft R23 en R19 apart (Zanac-EX: ~130 cycles uit
+        // elkaar, structureel over een lijngrens); de tussenstand matcht bij
+        // precies één scrollwaarde per 256 en vuurde dan een spook-interrupt
+        // (scorevak-flikker, 1x per ~4s). Games bewapenen R19 altijd ruim
+        // vóór de doellijn, dus 2 lijnen vertraging is onzichtbaar.
+        ctx->coinc_skip = 2;
+        break;
     case 16:
         ctx->palette_first_pending = false; // nieuwe palette-pointer reset het paar
         break;
@@ -773,6 +783,12 @@ static inline bool cmd_block_active(const v9938_context_t *ctx)
     return ctx->cm != 0 && ctx->cm != 0xA && ctx->cm != 0xB && ctx->cm != 0xF;
 }
 
+void __not_in_flash_func(v9938_line_start)(v9938_context_t *ctx)
+{
+    ctx->lat_r19 = ctx->regs[19];
+    ctx->lat_r23 = ctx->regs[23];
+}
+
 void __not_in_flash_func(v9938_scanline)(v9938_context_t *ctx, int line)
 {
     int active_h = (ctx->regs[9] & 0x80) ? 212 : 192;
@@ -787,7 +803,30 @@ void __not_in_flash_func(v9938_scanline)(v9938_context_t *ctx, int line)
     if (cmd_block_active(ctx) && ctx->cops > 0)
         cmd_engine(ctx);
 
-    if (((line + ctx->regs[23]) & 0xFF) == ctx->regs[19]) {
+    // De lijn-coïncidentie vuurt alleen binnen MAME's scanline-venster
+    // (`scanline >= 0 && scanline <= m_scanline_max`): het actieve beeld PLUS
+    // de onderborder, tot vlak voor de vsync. NIET strakker gaten op active_h:
+    // Quarth parkeert R19 in de onderborder en rekent erop dat FH daar nog
+    // vuurt. Maar ook niet ongegate: (line+R23)&255==R19 matcht anders óók op
+    // line+256 diep in de vblank (Zanac-EX PAL, 313 lijnen: split hoort op
+    // lijn 12 maar matchte óók op 268, waardoor de ISR zich in de vblank
+    // herbewapende en de score-split het zichtbare veld nooit haalde).
+    // MAME set_screen_parameters: NTSC max = R9.7 ? 234 : 244; PAL max = 255.
+    // Vergelijk met de GELATCHTE R19/R23 (stand op de lijnstart): een ISR die
+    // eerst R23 en pas een lijn later R19 schrijft (Zanac-EX-herstel) heeft
+    // anders één lijn lang een tussenstand die toevallig kan matchen ->
+    // spookvuring -> de game-ISR schakelt in de vblank naar veldregisters ->
+    // het hele scorevak flikkert (trof precies 1x per 256 frames, bij
+    // veldscroll 0xDA). De echte V9938 sampelt op de lijnstart.
+    int scan_max = (ctx->regs[9] & 0x02) ? 255
+                 : ((ctx->regs[9] & 0x80) ? 234 : 244);
+    bool coinc = (line <= scan_max) &&
+                 (((line + ctx->lat_r23) & 0xFF) == ctx->lat_r19);
+    if (ctx->coinc_skip) {
+        ctx->coinc_skip--;
+        coinc = false; // verse R19/R23-write: tussenstand telt niet als match
+    }
+    if (coinc) {
         ctx->status[1] |= S1_FH;
         ctx->line_irq_pending = true;
         if (IE1(ctx) && ctx->irq_func)
@@ -819,6 +858,7 @@ void v9938_vblank(v9938_context_t *ctx)
         ctx->cops = 1 << 28;
         cmd_engine(ctx);
     }
+    v9938_line_start(ctx); // frame-granulair: latch = live registers
     v9938_scanline(ctx, (ctx->regs[9] & 0x80) ? 212 : 192);
 }
 

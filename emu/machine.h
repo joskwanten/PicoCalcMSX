@@ -44,8 +44,13 @@ bool machine_init_msx2(const uint8_t *bios, uint32_t bios_size,
                        uint8_t *vram128k, uint8_t *sccplus_ram64k);
 bool machine_is_msx2(void);
 
+// Slot 1-mapper forceren i.p.v. auto-detect: -1 = auto, anders een MAPPER_*-
+// waarde. Aanroepen VÓÓR machine_init/machine_init_msx2 (eenmalig).
+void machine_set_mapper_override(int type);
+
 int machine_display_width(void);  // 256 (MSX1) of 512 (MSX2)
 int machine_display_height(void); // 192 (MSX1) of 212 (MSX2)
+int machine_frame_lines(void);    // 262 (NTSC/60Hz) of 313 (PAL/50Hz, R9 bit1)
 void machine_do_cycles();
 void machine_generate_interrupt();
 void machine_get_audio(int16_t* chunk, uint32_t len);

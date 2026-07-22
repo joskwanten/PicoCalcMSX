@@ -25,7 +25,7 @@
 // Ring van 24 lijnen: core 0 rendert vooruit in de ring (render-op-core-0-
 // model), core 1 scant 'm uit. Ruim genoeg om z80-variantie (muziek/blit) te
 // absorberen zonder de scanout in te halen.
-#define RING_N 24
+#define RING_N VHSTX_RING_N
 static uint16_t ring[RING_N][512];
 static volatile int16_t ring_line[RING_N];
 static volatile uint16_t ring_w[RING_N];
@@ -120,7 +120,13 @@ static void __not_in_flash_func(pipeline_task)(void)
         }
     }
 
-        // Audio eerst: de data-island-queue is latency-kritischer dan de
+    // Audio-synthese draait op core 1 (hier), niet op core 0: core 0 doet puur
+    // emulatie+render. De scanline-callback zit in de DMA-IRQ en preempt deze
+    // achtergrondtaak, dus een synthese-burst kan de scanout nooit verhongeren.
+    // Klein begrensd (self-limiting tot ring halfvol) — pipeline_task draait
+    // vele malen per scanlijn, dus dit houdt de ring ruim bij.
+    audio_hdmi_generate_burst(64);
+    // Daarna pompen: de data-island-queue is latency-kritischer dan de
     // lijnproducer (die 2-3 lijnen speling heeft).
     audio_hdmi_pump();
 }

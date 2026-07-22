@@ -55,6 +55,16 @@ typedef struct {
     // Interrupts: frame-IRQ (IE0/S0-F) en lijn-IRQ (IE1/R19, ack via S1).
     bool line_irq_pending;
     int16_t beam_line; // laatst verwerkte scanline (voor de IE1-flankwis)
+    // R19/R23 zoals ze golden aan het BEGIN van de lijn-slice (gelatcht in
+    // v9938_line_start). De lijn-coïncidentie vergelijkt hiermee: de echte
+    // V9938 sampelt op de lijnstart, dus een ISR die mid-lijn eerst R23 en
+    // een lijn later R19 schrijft (Zanac-EX) mag met z'n tussenstand geen
+    // spookvuring veroorzaken.
+    uint8_t lat_r19, lat_r23;
+    // Na een write aan R19/R23 de eerstvolgende 2 coïncidentie-checks
+    // overslaan: een split-ISR schrijft R23 en R19 los van elkaar (soms over
+    // een lijngrens heen), en de tussenstand mag nooit als match tellen.
+    uint8_t coinc_skip;
     v9938_irq_func_t irq_func;
 
     // Command-engine (R32-R46). VRAM-commando's voeren synchroon uit bij de
@@ -96,6 +106,9 @@ bool v9938_irq_asserted(v9938_context_t *ctx);
 // (0..261); regelt FH/VR/S0.F + IRQs. v9938_vblank is de frame-granulaire
 // fallback voor aanroepers zonder scanline-lus.
 void v9938_scanline(v9938_context_t *ctx, int line);
+// Aanroepen vóór de Z80-slice van een lijn: latcht R19/R23 voor de
+// coïncidentie-check die v9938_scanline na de slice doet.
+void v9938_line_start(v9938_context_t *ctx);
 void v9938_vblank(v9938_context_t *ctx);
 
 // Render één displaylijn (0..V9938_LINES-1) naar een V9938_LINE_W-brede
