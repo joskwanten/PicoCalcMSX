@@ -1,4 +1,5 @@
 #include "menu.h"
+#include "mapper.h" // mapper_detect_stream / mapper_name (slot 1-mapper-override)
 
 #include <stdio.h>
 #include <string.h>
@@ -26,6 +27,55 @@ static mode_t g_mode;
 
 // main screen: rows 0..2 = slot1/slot2/diskA, 3 = Start
 static int g_sel;
+// Selecteerbare items op het hoofdscherm.
+enum { SEL_SLOT1 = 0, SEL_MAPPER, SEL_SLOT2, SEL_DISKA, SEL_START, SEL_N };
+
+// --- slot 1-mapper: auto-detect (streamend — de ROM is niet geladen in het
+// menu) + override. Gedetecteerde waarde gecached per slot1-naam. ---
+static char g_map_for[STORAGE_MAX_NAME];
+static mapper_type_t g_map_det;
+static long menu_rom_read(void *ctx, uint32_t off, uint8_t *buf, uint32_t len)
+{
+    return storage_read_at(SD_ROMS, (const char *)ctx, off, buf, len);
+}
+static bool name_is_zip(const char *n)
+{
+    size_t l = strlen(n);
+    return l >= 4 && n[l-4] == '.' && (n[l-3]|32) == 'z' && (n[l-2]|32) == 'i'
+        && (n[l-1]|32) == 'p';
+}
+static mapper_type_t detected_mapper(void)
+{
+    // .zip: pas na uitpakken te bepalen -> geen hint.
+    if (!g_cfg->slot1[0] || name_is_zip(g_cfg->slot1)) return MAPPER_NONE;
+    if (strcmp(g_map_for, g_cfg->slot1) != 0) { // cache-miss -> scan
+        snprintf(g_map_for, sizeof g_map_for, "%s", g_cfg->slot1);
+        long sz = storage_size(SD_ROMS, g_cfg->slot1);
+        g_map_det = (sz > 0)
+            ? mapper_detect_stream(g_cfg->slot1, menu_rom_read, (uint32_t)sz)
+            : MAPPER_NONE;
+    }
+    return g_map_det;
+}
+static const char *mapper_label(void)
+{
+    static char b[28];
+    if (g_cfg->mapper1 < 0) { // auto
+        mapper_type_t d = detected_mapper();
+        if (d == MAPPER_NONE) return "auto";
+        snprintf(b, sizeof b, "auto (%s)", mapper_name(d));
+        return b;
+    }
+    return mapper_name((mapper_type_t)g_cfg->mapper1);
+}
+static void mapper_cycle(void)
+{
+    static const int8_t seq[] = { -1, MAPPER_PLAIN, MAPPER_KONAMI,
+                                  MAPPER_ASCII8, MAPPER_ASCII16, MAPPER_KONAMI_SCC };
+    int i = 0;
+    for (int k = 0; k < 6; k++) if (seq[k] == g_cfg->mapper1) { i = k; break; }
+    g_cfg->mapper1 = seq[(i + 1) % 6];
+}
 
 // browse sub-screen
 static int g_field;                 // which config field is being set (0..3)
@@ -104,29 +154,36 @@ static void render_main(uint16_t *fb)
     draw_text(fb, 12, 1, "BareMSX", COL_TITLE, COL_BG); // (32-7)/2 = gecentreerd
     draw_text(fb, 3, 3, "-- select cartridges/disks --", COL_DIM, COL_BG);
 
-    // (Drive B bestaat niet in de emulatie; diskwissel = F12 in-game.)
-    static const char *labels[3] = {"Slot 1:", "Slot 2:", "Disk A:"};
-    const char *vals[3] = {g_cfg->slot1, g_cfg->slot2, g_cfg->diskA};
-
-    for (int i = 0; i < 3; i++) {
+    // Mapper = slot 1-eigenschap (cyclet i.p.v. bladeren). Drive B bestaat
+    // niet; diskwissel = F12 in-game.
+    static const char *labels[4] = {"Slot 1:", "Mapper:", "Slot 2:", "Disk A:"};
+    for (int i = 0; i < 4; i++) {
         int row = 6 + i * 2;
         bool sel = (g_sel == i);
         uint32_t fg = sel ? COL_SEL_TEXT : COL_TEXT;
         uint32_t bg = sel ? COL_SEL_BG : COL_BG;
         if (sel) fill_row(fb, row, COL_SEL_BG);
         draw_text(fb, 3, row, labels[i], fg, bg);
-        if (vals[i][0])
-            draw_text(fb, 11, row, vals[i], fg, bg);
-        else
+
+        const char *v = "(empty)"; bool empty = false;
+        switch (i) {
+        case SEL_SLOT1:  v = g_cfg->slot1; empty = !v[0]; break;
+        case SEL_MAPPER: v = mapper_label(); break; // altijd gevuld (auto/...)
+        case SEL_SLOT2:  v = g_cfg->slot2; empty = !v[0]; break;
+        default:         v = g_cfg->diskA; empty = !v[0]; break;
+        }
+        if (empty)
             draw_text(fb, 11, row, "(empty)", sel ? fg : COL_DIM, bg);
+        else
+            draw_text(fb, 11, row, v, fg, bg);
     }
 
     // Start
-    bool ssel = (g_sel == 3);
-    if (ssel) fill_row(fb, 17, COL_SEL_BG);
-    draw_text(fb, 12, 17, "[ Start ]", ssel ? COL_SEL_TEXT : COL_TEXT, ssel ? COL_SEL_BG : COL_BG);
+    bool ssel = (g_sel == SEL_START);
+    if (ssel) fill_row(fb, 15, COL_SEL_BG);
+    draw_text(fb, 12, 15, "[ Start ]", ssel ? COL_SEL_TEXT : COL_TEXT, ssel ? COL_SEL_BG : COL_BG);
 
-    draw_text(fb, 2, 22, "up/dn  enter=pick  esc=clear", COL_DIM, COL_BG);
+    draw_text(fb, 2, 22, "up/dn  enter=pick/cycle  esc=clear", COL_DIM, COL_BG);
 }
 
 #define BROWSE_ROWS 18 // zichtbare lijstregels (rows 3..20); ook de pgup/pgdn-stap
@@ -177,16 +234,19 @@ void menu_init(const uint8_t *bios, menu_config_t *cfg)
     uint16_t cgtabl = (uint16_t)(bios[0x0004] | (bios[0x0005] << 8)); // MSX CGTABL pointer
     g_font = &bios[cgtabl];
     g_cfg = cfg;
+    if (g_cfg->mapper1 == 0) g_cfg->mapper1 = -1; // default: auto-detect
+    g_map_for[0] = 0;                             // scan-cache leegmaken
     g_start = false;
     g_mode = MODE_MAIN;
     g_sel = 0;
 }
 
-static void open_browse(int field)
+static void open_browse(int sel)
 {
-    g_field = field;
-    g_dir = (field < 2) ? SD_ROMS : SD_DSK;
-    g_target = (field == 0) ? g_cfg->slot1 : (field == 1) ? g_cfg->slot2
+    g_field = sel;
+    g_dir = (sel == SEL_DISKA) ? SD_DSK : SD_ROMS;
+    g_target = (sel == SEL_SLOT1) ? g_cfg->slot1
+             : (sel == SEL_SLOT2) ? g_cfg->slot2
              : g_cfg->diskA;
     int n = storage_list(g_dir, g_list, (int)(sizeof g_list / sizeof g_list[0]));
     g_list_n = (n < 0) ? 0 : n;
@@ -200,17 +260,19 @@ void menu_input(menu_input_t in)
 {
     if (g_mode == MODE_MAIN) {
         switch (in) {
-        case MENU_UP:   g_sel = (g_sel + 3) % 4; break;
-        case MENU_DOWN: g_sel = (g_sel + 1) % 4; break;
+        case MENU_UP:   g_sel = (g_sel + SEL_N - 1) % SEL_N; break;
+        case MENU_DOWN: g_sel = (g_sel + 1) % SEL_N; break;
         case MENU_ENTER:
-            if (g_sel == 3) g_start = true;
-            else open_browse(g_sel);
+            if (g_sel == SEL_START)       g_start = true;
+            else if (g_sel == SEL_MAPPER) mapper_cycle();  // override doorlopen
+            else                          open_browse(g_sel);
             break;
-        case MENU_BACK: // Esc/Backspace: clear the selected field
+        case MENU_BACK: // Esc/Backspace: veld wissen / mapper terug naar auto
         case MENU_DEL:
-            if (g_sel < 3) {
-                char *t = (g_sel == 0) ? g_cfg->slot1 : (g_sel == 1) ? g_cfg->slot2
-                        : g_cfg->diskA;
+            if (g_sel == SEL_MAPPER) g_cfg->mapper1 = -1;
+            else if (g_sel != SEL_START) {
+                char *t = (g_sel == SEL_SLOT1) ? g_cfg->slot1
+                        : (g_sel == SEL_SLOT2) ? g_cfg->slot2 : g_cfg->diskA;
                 t[0] = 0;
             }
             break;
@@ -233,6 +295,7 @@ void menu_input(menu_input_t in)
         case MENU_ENTER:
             if (g_fn > 0) {
                 snprintf(g_target, STORAGE_MAX_NAME, "%s", g_list[g_fidx[g_bsel]].name);
+                if (g_field == SEL_SLOT1) g_cfg->mapper1 = -1; // nieuwe ROM -> auto
                 g_mode = MODE_MAIN;
             }
             break;

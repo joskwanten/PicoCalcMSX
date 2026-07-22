@@ -27,6 +27,12 @@ typedef struct {
 // Guess the mapper from the ROM (size + bank-switch write-pattern heuristic).
 mapper_type_t mapper_detect(const uint8_t *rom, uint32_t size);
 
+// Zelfde heuristiek, maar streamend via een leescallback — voor het menu, dat
+// de mapper wil tonen zonder de (tot 512KB) ROM helemaal in RAM te laden.
+// `read(ctx, off, buf, len)` retourneert het aantal gelezen bytes (of <0).
+typedef long (*mapper_read_fn)(void *ctx, uint32_t off, uint8_t *buf, uint32_t len);
+mapper_type_t mapper_detect_stream(void *ctx, mapper_read_fn read, uint32_t size);
+
 void mapper_init(mapper_t *m, const uint8_t *rom, uint32_t size, mapper_type_t type);
 uint8_t mapper_read(void *context, uint16_t address);
 void mapper_write(void *context, uint16_t address, uint8_t value);

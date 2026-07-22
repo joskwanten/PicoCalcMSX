@@ -86,47 +86,78 @@ void __not_in_flash_func(mapper_write)(void *context, uint16_t address, uint8_t 
     }
 }
 
-mapper_type_t mapper_detect(const uint8_t *rom, uint32_t size)
+// Bank-switch-write-histogram (LD (nnnn),A = 0x32). We tellen alleen de
+// ONDERSCHEIDENDE adressen — 0x6000/0x7000 delen (bijna) alle mappers, dus
+// die zeggen niets over SCC/Konami. Een echte SCC-game schrijft naar
+// 0x5000/0x9000/0xB000, een Konami-game naar 0x8000/0xA000, een ASCII8-game
+// naar 0x6800/0x7800. Wie alléén 0x6000/0x7000 gebruikt is ASCII16.
+typedef struct { int scc_bits, kon_bits, scc_n, kon_n, a8; } bankhist_t;
+
+// Tel de patronen in buf[0..n-3] (de laatste 2 bytes horen bij de volgende
+// chunk-overlap bij streaming).
+static void bankhist_scan(bankhist_t *h, const uint8_t *buf, uint32_t n)
 {
-    if (rom == 0 || size == 0) return MAPPER_NONE;
-
-    // Small ROMs are plain (16K/32K/48K without a mapper).
-    if (size <= 32u * 1024u) return MAPPER_PLAIN;
-
-    // Heuristic: count LD (nnnn),A (0x32) writes to each mapper's bank
-    // registers. We tellen alleen de ONDERSCHEIDENDE adressen — 0x6000 en
-    // 0x7000 delen (bijna) alle mappers, dus die zeggen niets over SCC/Konami.
-    // Een echte SCC-game schrijft naar 0x5000/0x9000/0xB000, een Konami-game
-    // naar 0x8000/0xA000, een ASCII8-game naar 0x6800/0x7800. Wie alléén
-    // 0x6000/0x7000 gebruikt is ASCII16 (twee 16KB-banks) — dat was Zanac-EX,
-    // dat eerder als konami-scc werd misgedetecteerd door de gedeelde adressen.
-    int scc_bits = 0, kon_bits = 0, scc_n = 0, kon_n = 0, a8_ex = 0;
-    for (uint32_t i = 0; i + 2 < size; i++) {
-        if (rom[i] != 0x32) continue; // LD (nnnn),A
-        uint16_t a = (uint16_t)(rom[i + 1] | (rom[i + 2] << 8));
+    if (n < 3) return;
+    for (uint32_t i = 0; i + 2 < n; i++) {
+        if (buf[i] != 0x32) continue;
+        uint16_t a = (uint16_t)(buf[i + 1] | (buf[i + 2] << 8));
         switch (a) {
-        case 0x5000: scc_bits |= 1; scc_n++; break; // SCC-exclusieve banks
-        case 0x9000: scc_bits |= 2; scc_n++; break;
-        case 0xB000: scc_bits |= 4; scc_n++; break;
-        case 0x4000: kon_bits |= 1; kon_n++; break; // Konami-exclusieve banks
-        case 0x8000: kon_bits |= 2; kon_n++; break;
-        case 0xA000: kon_bits |= 4; kon_n++; break;
-        case 0x6800: case 0x7800: a8_ex++; break;   // ASCII8-exclusief
-        // 0x6000/0x7000 zijn gedeeld (alle mappers) -> geen onderscheidende stem
+        case 0x5000: h->scc_bits |= 1; h->scc_n++; break;
+        case 0x9000: h->scc_bits |= 2; h->scc_n++; break;
+        case 0xB000: h->scc_bits |= 4; h->scc_n++; break;
+        case 0x4000: h->kon_bits |= 1; h->kon_n++; break;
+        case 0x8000: h->kon_bits |= 2; h->kon_n++; break;
+        case 0xA000: h->kon_bits |= 4; h->kon_n++; break;
+        case 0x6800: case 0x7800: h->a8++; break;
         default: break;
         }
     }
+}
 
-    // Een échte megaROM paget álle vensters, dus schrijft meerdere DISTINCT
-    // bank-registers en doet dat vaak. Eén losse write is toevallige data
-    // (Aleste: één 0x5000 -> werd fout als konami-scc gedetecteerd). Drempel:
-    // >=2 distinct onderscheidende registers, of >=6 writes.
-    int scc_d = __builtin_popcount((unsigned)scc_bits);
-    int kon_d = __builtin_popcount((unsigned)kon_bits);
-    bool is_scc = scc_d >= 2 || scc_n >= 6;
-    bool is_kon = kon_d >= 2 || kon_n >= 6;
-    if (is_scc && scc_n >= kon_n) return MAPPER_KONAMI_SCC;
+// Een échte megaROM paget álle vensters: meerdere DISTINCT bank-registers en
+// vaak. Eén losse write is toevallige data (Aleste: één 0x5000 -> werd fout
+// konami-scc). Drempel: >=2 distinct onderscheidende registers of >=6 writes.
+static mapper_type_t bankhist_classify(const bankhist_t *h)
+{
+    int scc_d = __builtin_popcount((unsigned)h->scc_bits);
+    int kon_d = __builtin_popcount((unsigned)h->kon_bits);
+    bool is_scc = scc_d >= 2 || h->scc_n >= 6;
+    bool is_kon = kon_d >= 2 || h->kon_n >= 6;
+    if (is_scc && h->scc_n >= h->kon_n) return MAPPER_KONAMI_SCC;
     if (is_kon) return MAPPER_KONAMI;
-    if (a8_ex) return MAPPER_ASCII8;
+    if (h->a8) return MAPPER_ASCII8;
     return MAPPER_ASCII16; // alleen gedeelde/geen writes -> veilige default
+}
+
+mapper_type_t mapper_detect(const uint8_t *rom, uint32_t size)
+{
+    if (rom == 0 || size == 0) return MAPPER_NONE;
+    if (size <= 32u * 1024u) return MAPPER_PLAIN; // 16/32/48K zonder mapper
+    bankhist_t h = {0};
+    bankhist_scan(&h, rom, size);
+    return bankhist_classify(&h);
+}
+
+// Streaming-variant: scan een ROM zonder 'm helemaal te laden (menu op de
+// Pico) via een leescallback. Leest in overlappende 4KB-chunks zodat het
+// 3-byte-patroon nooit op een chunkgrens verloren gaat.
+mapper_type_t mapper_detect_stream(void *ctx, mapper_read_fn read, uint32_t size)
+{
+    if (read == 0 || size == 0) return MAPPER_NONE;
+    if (size <= 32u * 1024u) return MAPPER_PLAIN;
+    bankhist_t h = {0};
+    // STATIC (geen 4KB op de stack): dit draait vanuit menu_render op core 0,
+    // en een grote stackbuffer liep de main-stack over -> geheugencorruptie.
+    // Enkeldradig menugebruik, dus static is veilig.
+    static uint8_t buf[2048];
+    for (uint32_t off = 0; off + 2 < size; ) {
+        uint32_t want = size - off;
+        if (want > sizeof buf) want = sizeof buf;
+        long got = read(ctx, off, buf, want);
+        if (got < 3) break;
+        bankhist_scan(&h, buf, (uint32_t)got);
+        if ((uint32_t)got < want) break;   // korter gelezen -> EOF
+        off += (uint32_t)got - 2;          // 2 bytes overlap voor het patroon
+    }
+    return bankhist_classify(&h);
 }

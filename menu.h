@@ -14,6 +14,7 @@ typedef struct {
     char slot1[STORAGE_MAX_NAME]; // cartridge ROM (roms/)   — "" = empty
     char slot2[STORAGE_MAX_NAME]; // cartridge ROM (roms/)
     char diskA[STORAGE_MAX_NAME]; // disk image (dsk/)        — wired later
+    int8_t mapper1;               // slot 1-mapper: -1 = auto, anders MAPPER_*
 } menu_config_t;
 
 typedef enum {
